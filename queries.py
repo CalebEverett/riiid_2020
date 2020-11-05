@@ -11,6 +11,13 @@ class Queries:
             LIMIT {limit}
         """, sys._getframe().f_code.co_name + '_'
 
+    def update_missing_values(self, table_id='train', column_id=None, value=None):
+        return f"""
+            UPDATE {self.DATASET}.{table_id}
+            SET {column_id} = {value}
+            WHERE {column_id} is NULL;
+        """, sys._getframe().f_code.co_name + '_'
+
     def update_task_container_id(self, table_id='train', column_id_orig='task_container_id_orig'):
         return f"""
             UPDATE {self.DATASET}.{table_id}
@@ -84,21 +91,24 @@ class Queries:
         """, sys._getframe().f_code.co_name + '_'    
         
     def update_train_window(self, table_id='train', source_column_id='answered_correctly',
-                         update_column_id=None, window=0, agg='SUM'):
+                         update_column_id=None, window=0, agg='SUM', part_content=False):
         """Calculates aggregate over preceding task_container_ids, limited
         to `window number` of task_container_ids unless window is 0 and then
         includes all task_container_ids.
         """
         
+        partition = 'user_id, content_id' if part_content else 'user_id'
+
         return f"""            
             UPDATE {self.DATASET}.{table_id} t
             SET {update_column_id} = source.calc
             FROM (
               SELECT row_id, {agg}({source_column_id})
                 OVER (
-                    PARTITION BY user_id
+                    PARTITION BY {partition}
                     ORDER BY task_container_id
-                    RANGE BETWEEN {window if window else 'UNBOUNDED'} PRECEDING AND 1 PRECEDING
+                    RANGE BETWEEN {window if window else 'UNBOUNDED'} PRECEDING
+                        AND 1 PRECEDING
                   ) calc
               FROM {self.DATASET}.{table_id}
               ORDER BY user_id, task_container_id, row_id
@@ -112,10 +122,11 @@ class Queries:
     
     def update_train_window_upto(self, table_id='train',
                                  source_column_id='answered_correctly_cumsum',
-                                 update_column_id=None, window=10):
-        """Calculates aggregate over upto number of task_container_ids equal to
-        window. Records with task_container_ids greater than window will get
-        populated with max value.
+                                 update_column_id='answered_correctly_cumsum10',
+                                  window=10):
+        """Updates update_column_id with source_column_id for task_container_id
+        less than window and max of source_column_id less than task_container_id
+        for task_container_id greater than window.
         """
         
         return f"""            
@@ -135,8 +146,9 @@ class Queries:
               AND source.user_id = t.user_id;
         """, sys._getframe().f_code.co_name + '_'
 
-    def update_correct_cumsum_pct(self, column_id_correct, column_id_incorrect,
-                                  update_column_id, table_id='train'):
+    def update_correct_cumsum_pct(self, column_id_correct=None,
+                                  column_id_incorrect=None,
+                                  update_column_id=None, table_id='train'):
         return f"""
             CREATE TEMP FUNCTION calcCorrectPct(c INT64, ic INT64) AS (
               CAST(SAFE_DIVIDE(c, (c + ic)) * 100 AS INT64)
