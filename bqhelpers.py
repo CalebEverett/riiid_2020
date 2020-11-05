@@ -17,7 +17,7 @@ class BQHelper:
    
     # LOAD FUNCTTIONS 
     # ================
-    def load_job_cb(future):
+    def load_job_cb(self, future):
         """Prints update upon completion to output of last run cell."""
         
         seconds = (future.ended - future.created).total_seconds()
