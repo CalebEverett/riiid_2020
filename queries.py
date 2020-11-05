@@ -110,8 +110,9 @@ class Queries:
             WHERE {update_column_id} IS NULL;
         """, sys._getframe().f_code.co_name + '_'
     
-    def update_train_window_upto(self, table_id='train', source_column_id='answered_correctly',
-                         update_column_id=None, window=10):
+    def update_train_window_upto(self, table_id='train',
+                                 source_column_id='answered_correctly_cumsum',
+                                 update_column_id=None, window=10):
         """Calculates aggregate over upto number of task_container_ids equal to
         window. Records with task_container_ids greater than window will get
         populated with max value.
@@ -120,29 +121,45 @@ class Queries:
         return f"""            
             UPDATE {self.DATASET}.{table_id}
             SET {update_column_id} = {source_column_id}
-            WHERE t.task_container_id <= {window}
+            WHERE task_container_id <= 10;
 
-            UPDATE {self.DATASET}.{table_id}
-            SET {update_column_id} = source.calc
+            UPDATE {self.DATASET}.{table_id} t
+            SET {update_column_id} = source.ac
             FROM (
-                SELECT MAX({source_column_id}) calc
+                SELECT user_id, MAX(answered_correctly_cumsum) ac
                 FROM {self.DATASET}.{table_id}
-                WHERE task_container_id = {window}
+                WHERE task_container_id <= 10
+                GROUP BY user_id
             ) source
+            WHERE task_container_id > 10
+              AND source.user_id = t.user_id;
         """, sys._getframe().f_code.co_name + '_'
 
-    def update_question_correct_pct(self, column_id=None):
+    def update_correct_cumsum_pct(self, column_id_correct, column_id_incorrect,
+                                  update_column_id, table_id='train'):
+        return f"""
+            CREATE TEMP FUNCTION calcCorrectPct(c INT64, ic INT64) AS (
+              CAST(SAFE_DIVIDE(c, (c + ic)) * 100 AS INT64)
+            );
+
+            UPDATE {self.DATASET}.{table_id}
+            SET {update_column_id} =
+                calcCorrectPct({column_id_correct}, {column_id_incorrect})
+            WHERE true
+        """, sys._getframe().f_code.co_name + '_'
+
+    def update_question_correct_pct(self):
         return f"""  
             CREATE TEMP FUNCTION calcCorrectPct(c INT64, ic INT64) AS (
               CAST(SAFE_DIVIDE(c, (c + ic)) * 100 AS INT64)
             );
 
-            UPDATE data.questions q
+            UPDATE {self.DATASET}.questions q
             SET q.{column_id}_correct_pct = calcCorrectPct(c.c, c.ic)
             FROM (
                 SELECT cq.{column_id}, SUM(answered_correctly) c, SUM(answered_incorrectly) ic
-                FROM data.train t
-                JOIN data.questions cq
+                FROM {self.DATASET}.train t
+                JOIN {self.DATASET}.questions cq
                 ON t.content_id = cq.question_id
                 WHERE t.content_type_id = 0
                 GROUP BY cq.{column_id}
