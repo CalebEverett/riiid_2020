@@ -1,9 +1,8 @@
 import sys
 
 class Queries:
-    def __init__(self, DATASET, bq_client):
+    def __init__(self, DATASET):
         self.DATASET = DATASET
-        self.bq_client = bq_client
     
     def select_rows(self, table_id='train', limit=100):
         return f"""
@@ -85,7 +84,7 @@ class Queries:
         """, sys._getframe().f_code.co_name + '_'    
         
     def update_train_window(self, table_id='train', source_column_id='answered_correctly',
-                         update_column_id=None, window=0):
+                         update_column_id=None, window=0, agg='SUM'):
         """Calculates aggregate over preceding task_container_ids, limited
         to `window number` of task_container_ids unless window is 0 and then
         includes all task_container_ids.
@@ -95,7 +94,7 @@ class Queries:
             UPDATE {self.DATASET}.{table_id} t
             SET {update_column_id} = source.calc
             FROM (
-              SELECT row_id, SUM({source_column_id})
+              SELECT row_id, {agg}({source_column_id})
                 OVER (
                     PARTITION BY user_id
                     ORDER BY task_container_id
@@ -111,10 +110,31 @@ class Queries:
             WHERE {update_column_id} IS NULL;
         """, sys._getframe().f_code.co_name + '_'
     
+    def update_train_window_upto(self, table_id='train', source_column_id='answered_correctly',
+                         update_column_id=None, window=10):
+        """Calculates aggregate over upto number of task_container_ids equal to
+        window. Records with task_container_ids greater than window will get
+        populated with max value.
+        """
+        
+        return f"""            
+            UPDATE {self.DATASET}.{table_id}
+            SET {update_column_id} = {source_column_id}
+            WHERE t.task_container_id <= {window}
+
+            UPDATE {self.DATASET}.{table_id}
+            SET {update_column_id} = source.calc
+            FROM (
+                SELECT MAX({source_column_id}) calc
+                FROM {self.DATASET}.{table_id}
+                WHERE task_container_id = {window}
+            ) source
+        """, sys._getframe().f_code.co_name + '_'
+
     def update_question_correct_pct(self, column_id=None):
         return f"""  
             CREATE TEMP FUNCTION calcCorrectPct(c INT64, ic INT64) AS (
-              CAST(c / (c + ic) * 100 AS INT64)
+              CAST(SAFE_DIVIDE(c, (c + ic)) * 100 AS INT64)
             );
 
             UPDATE data.questions q
