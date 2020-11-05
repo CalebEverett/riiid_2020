@@ -1,9 +1,6 @@
-# adding  comment here to test commit from colab
-
 import sys
 
 class Queries:
-
     def __init__(self, DATASET, bq_client):
         self.DATASET = DATASET
         self.bq_client = bq_client
@@ -14,7 +11,6 @@ class Queries:
             FROM {self.DATASET}.{table_id}
             LIMIT {limit}
         """, sys._getframe().f_code.co_name + '_'
-
 
     def update_task_container_id(self, table_id='train', column_id_orig='task_container_id_orig'):
         return f"""
@@ -35,7 +31,6 @@ class Queries:
             WHERE target.row_id = t.row_id
         """, sys._getframe().f_code.co_name + '_'
 
-
     def create_train_sample(self, suffix='sample', user_id_max=50000):
         return f"""
             CREATE OR REPLACE TABLE {self.DATASET}.train_{suffix} AS
@@ -44,7 +39,6 @@ class Queries:
             WHERE user_id <= {user_id_max}
             ORDER BY user_id, task_container_id, row_id
         """, sys._getframe().f_code.co_name + '_'
-
 
     def select_train(self, columns=['*'], user_id_max=50000,
                      excl_lectures=False, table_id='train'):
@@ -62,7 +56,6 @@ class Queries:
             ORDER BY user_id, task_container_id, row_id
         """, sys._getframe().f_code.co_name + '_'
     
-
     def update_answered_incorrectly(self, table_id='train'):
         """Sets annswered_incorrectly to inverse of answered_correctly for questions.
         Sets answered_correctly to 0 for lectures so window totals for correct and
@@ -90,8 +83,7 @@ class Queries:
             SET tag__0 = tags[OFFSET(0)]
             WHERE true;
         """, sys._getframe().f_code.co_name + '_'    
-    
-    
+        
     def update_train_window(self, table_id='train', source_column_id='answered_correctly',
                          update_column_id=None, window=0):
         """Calculates aggregate over preceding task_container_ids, limited
@@ -118,7 +110,6 @@ class Queries:
             SET {update_column_id} = 0
             WHERE {update_column_id} IS NULL;
         """, sys._getframe().f_code.co_name + '_'
-
     
     def update_question_correct_pct(self, column_id=None):
         return f"""  
@@ -139,7 +130,6 @@ class Queries:
             WHERE q.{column_id} = c.{column_id}
         """, sys._getframe().f_code.co_name + '_'
 
-    
     def select_user_id_rows(self, table_id='train', rows=30000):
         return f"""            
             SELECT user_id
@@ -147,7 +137,6 @@ class Queries:
             WHERE row_id = {rows}
         """, sys._getframe().f_code.co_name + '_'
     
-
     def select_user_final_state(self):
         return f"""            
             SELECT t.user_id, t.task_container_id, t.answered_correctly_cumsum,
@@ -178,7 +167,6 @@ class Queries:
             ORDER BY t.user_id
         """, sys._getframe().f_code.co_name + '_'
     
-
     def select_user_roll_arrays(self, n_roll=11):
         """Work in progress. Still need to come up with a way to
         efficiently update rolling statistics during test prediction
@@ -201,19 +189,4 @@ class Queries:
             ) t
             WHERE t.row_number < {n_roll}
             GROUP BY user_id
-        """, sys._getframe().f_code.co_name + '_'        
-
-    
-    def done_cb(self, future):
-        seconds = (future.ended - future.started).total_seconds()
-        print(f'Job {future.job_id} finished in {seconds} seconds.')
-
-    
-    def run_query(self, query, job_id_prefix=None, wait=False):
-        query_job = bq_client.query(query, job_id_prefix=job_id_prefix)
-        print(f'Job {query_job.job_id} started.')
-        query_job.add_done_callback(self.done_cb)
-        if wait:
-            query_job.result()
-        
-        return query_job
+        """, sys._getframe().f_code.co_name + '_'
