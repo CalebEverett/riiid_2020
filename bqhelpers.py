@@ -109,7 +109,7 @@ class BQHelper:
         
         return query_job
 
-    def get_df_query(self, query, dtypes, job_prefix_id):
+    def get_df_query(self, query, dtypes=None):
         query_job = self.run_query(*query)
 
         df_query = query_job.to_dataframe(dtypes=dtypes, 

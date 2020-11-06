@@ -192,8 +192,11 @@ class Queries:
     
     def select_user_final_state(self):
         return f"""            
-            SELECT t.user_id, t.task_container_id, t.answered_correctly_cumsum,
-              t.answered_incorrectly_cumsum
+            SELECT t.user_id, t.task_container_id, t.content_id
+              t.answered_correctly_cumsum, t.answered_incorrectly_cumsum,
+              t.answered_correctly_content_id_cumsum, t.answered_incorrectly_content_id_cumsum
+              t.answered_correctly_roll10sum, t.answered_incorrectly_roll10sum
+              t.lectures_cumcount, t.prior_question_elapsed_time_roll10avg
             FROM (
               SELECT user_id,
                 MAX(task_container_id) task_container_id,
@@ -212,9 +215,8 @@ class Queries:
                   SUM(answered_correctly) OVER w answered_correctly_roll,
                   SUM(answered_incorrectly) OVER w answered_incorrectly_roll
                 FROM data.train t2
-                WINDOW w  AS (PARTITION BY user_id ORDER BY task_container_id RANGE BETWEEN 9 PRECEDING AND 0 PRECEDING)
+                WINDOW w  AS (PARTITION BY user_id, content_id ORDER BY task_container_id RANGE BETWEEN 9 PRECEDING AND 0 PRECEDING)
                 ) ji
-                GROUP BY user_id
                ) j
             ON t.user_id = j.user_id
             ORDER BY t.user_id
