@@ -23,7 +23,7 @@ def get_v_tuple(v):
     return tuple([int(s) for s in v.split('.')])
 
 def check_package(p, v):
-    output = run_command(f'pip freeze | grep {p}')
+    output = run_command(f'pip freeze | grep -w {p}')
     if output == '':
         porc(f'pip install {p}')
     elif get_v_tuple(output[output.find('==')+2:]) < get_v_tuple(v):
