@@ -215,7 +215,11 @@ class Queries:
                   SUM(answered_correctly) OVER w answered_correctly_roll,
                   SUM(answered_incorrectly) OVER w answered_incorrectly_roll
                 FROM data.train t2
-                WINDOW w  AS (PARTITION BY user_id, content_id ORDER BY task_container_id RANGE BETWEEN 9 PRECEDING AND 0 PRECEDING)
+                WINDOW w  AS (
+                    PARTITION BY user_id, content_id
+                    ORDER BY task_container_id
+                    RANGE BETWEEN 9 PRECEDING AND 0 PRECEDING
+                    )
                 ) ji
                ) j
             ON t.user_id = j.user_id
