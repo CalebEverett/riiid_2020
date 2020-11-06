@@ -194,7 +194,6 @@ class BQHelper:
         
         prefix = str(file_paths[0].parent)
         suffix = file_paths[0].suffix
-        print(suffix)
         
         n_files = len(file_paths)
         print(f'Creating dataframe from {n_files} file{"s" if n_files > 1 else ""} for table {prefix}...')

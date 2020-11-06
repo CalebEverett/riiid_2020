@@ -42,11 +42,14 @@ class Git:
         self.password = password
         self.email = email
 
-    def clone(self):
+    def clone(self, latest=False):
         cred_repo = (
             f'https://{self.username}:{self.password}'
             f'@github.com/{self.username}/{self.repo}.git'
         )
+
+        if latest:
+            cred_repo = f'--depth 1 {cred_repo}'
 
         commands = []
         commands.append(f'git config --global user.email {self.email}')
