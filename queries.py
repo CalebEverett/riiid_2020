@@ -157,10 +157,14 @@ class Queries:
             UPDATE {self.DATASET}.{table_id}
             SET {update_column_id} =
                 calcCorrectPct({column_id_correct}, {column_id_incorrect})
-            WHERE true
+            WHERE true;
+            
+            UPDATE {self.DATASET}.{table_id}
+            SET {update_column_id} = 0
+            WHERE {update_column_id} IS NULL;
         """, sys._getframe().f_code.co_name + '_'
 
-    def update_question_correct_pct(self):
+    def update_question_correct_pct(self, column_id):
         return f"""  
             CREATE TEMP FUNCTION calcCorrectPct(c INT64, ic INT64) AS (
               CAST(SAFE_DIVIDE(c, (c + ic)) * 100 AS INT64)
