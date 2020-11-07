@@ -81,7 +81,8 @@ class BQHelper:
         df_jobs['seconds'] = (df_jobs.ended - df_jobs.started).dt.seconds
         df_jobs.started = df_jobs.started.astype(str).str[:16]
         del df_jobs['ended']
-        
+        bytes = int(job.estimated_bytes_processed/1e6) if job.estimated_bytes_processed else 0
+        df_jobs['bytes'] = bytes 
         return df_jobs
 
     def get_df_tables(self):
