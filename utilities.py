@@ -25,9 +25,9 @@ def get_v_tuple(v):
 def check_package(p, v):
     output = run_command(f'pip freeze | grep {p}==')
     if output == '':
-        porc(f'pip install {p}')
+        porc(f'pip install -q {p}')
     elif get_v_tuple(output[output.find('==')+2:]) < get_v_tuple(v):
-        porc(f'pip install -U {p}')
+        porc(f'pip install -q -U {p}')
     else:
         print_output(output)
 
@@ -43,6 +43,13 @@ class Git:
         self.email = email
         self.repo_path = base_path/repo
 
+    def config(self):
+        commands = []
+        commands.append(f'git config --global user.email {self.email}')
+        commands.append(f'git config --global user.name {self.username}')
+        for cmd in commands:
+            porc(cmd)    
+    
     def clone(self, latest=False):
         cwd = os.getcwd()
         os.chdir(self.base_path)
@@ -56,8 +63,6 @@ class Git:
             cred_repo = f'--depth 1 {cred_repo}'
 
         commands = []
-        commands.append(f'git config --global user.email {self.email}')
-        commands.append(f'git config --global user.name {self.username}')
         commands.append(f'git clone {cred_repo}')
         for cmd in commands:
             porc(cmd)

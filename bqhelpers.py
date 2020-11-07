@@ -68,22 +68,25 @@ class BQHelper:
                                     not_found_ok=True)
 
     def get_df_jobs(self, max_results=10):
-        jobs = []
-        for job in self.bq_client.list_jobs(max_results=max_results):
-            ended = job.ended if job.ended else datetime.now(pytz.UTC)
-            exception = job.exception() if job.ended else None
-            jobs.append({'job_id': job.job_id, 'job_type': job.job_type,
-                        'started': job.started, 'ended': ended,
-                        'running': job.running(),
-                        'exception': exception,
-                        })
-        df_jobs = pd.DataFrame(jobs)
-        df_jobs['seconds'] = (df_jobs.ended - df_jobs.started).dt.seconds
-        df_jobs.started = df_jobs.started.astype(str).str[:16]
-        del df_jobs['ended']
-        bytes = int(job.estimated_bytes_processed/1e6) if job.estimated_bytes_processed else 0
-        df_jobs['bytes'] = bytes 
-        return df_jobs
+        jobs = self.bq_client.list_jobs(max_results=max_results)
+        jobs_list = []
+
+        if jobs.num_results:
+            for job in jobs:
+                ended = job.ended if job.ended else datetime.now(pytz.UTC)
+                exception = job.exception() if job.ended else None
+                jobs_list.append({'job_id': job.job_id, 'job_type': job.job_type,
+                            'started': job.started, 'ended': ended,
+                            'running': job.running(),
+                            'exception': exception,
+                            })
+            df_jobs = pd.DataFrame(jobs_list)
+            df_jobs['seconds'] = (df_jobs.ended - df_jobs.started).dt.seconds
+            df_jobs.started = df_jobs.started.astype(str).str[:16]
+            del df_jobs['ended']
+            return df_jobs
+        else:
+            return None
 
     def get_df_tables(self):
         tables = []
