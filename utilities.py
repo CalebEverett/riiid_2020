@@ -36,13 +36,17 @@ def check_packages(packages):
         check_package(p, v)
 
 class Git:
-    def __init__(self, repo, username, password, email):
+    def __init__(self, repo, username, password, email, base_path):
         self.repo = repo
         self.username = username
         self.password = password
         self.email = email
+        self.repo_path = base_path/repo
 
     def clone(self, latest=False):
+        cwd = os.getcwd()
+        os.chdir(self.base_path)
+        
         cred_repo = (
             f'https://{self.username}:{self.password}'
             f'@github.com/{self.username}/{self.repo}.git'
@@ -58,16 +62,18 @@ class Git:
         for cmd in commands:
             porc(cmd)
 
+        os.chdir(cwd)
+
     def commit(self, message='made some changes'):
         cwd = os.getcwd()
-        os.chdir(self.repo)
+        os.chdir(self.repo_path)
         porc('git add -A')
         porc(f'git commit -m "{message}"')
         os.chdir(cwd)
 
     def command(self, command):
         cwd = os.getcwd()
-        os.chdir(self.repo)
+        os.chdir(self.repo_path)
         porc(f'git {command}')
         os.chdir(cwd)
 
