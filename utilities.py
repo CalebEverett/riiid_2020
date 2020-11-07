@@ -42,13 +42,15 @@ class Git:
         self.password = password
         self.email = email
         self.repo_path = base_path/repo
-
+        self.config()
+    
     def config(self):
         commands = []
         commands.append(f'git config --global user.email {self.email}')
         commands.append(f'git config --global user.name {self.username}')
         for cmd in commands:
-            porc(cmd)    
+            porc(cmd)
+        print('Git global user.name and user.email set.')
     
     def clone(self, latest=False):
         cwd = os.getcwd()
