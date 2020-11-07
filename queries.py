@@ -190,40 +190,29 @@ class Queries:
             WHERE row_id = {rows}
         """, sys._getframe().f_code.co_name + '_'
     
-    def select_user_final_state(self):
+    def select_user_final_state(self, user_column_ids=None, window=10, table_id='train'):
+        strings = []
+        for column_id, aggs in user_column_ids.items():
+            for agg in aggs:
+                strings.append(f'{agg}({column_id}) {column_id}_{agg.lower()}')
+        
+        strings = (',\n\t').join(strings)
+
         return f"""            
-            SELECT t.user_id, t.task_container_id, t.content_id
-              t.answered_correctly_cumsum, t.answered_incorrectly_cumsum,
-              t.answered_correctly_content_id_cumsum, t.answered_incorrectly_content_id_cumsum
-              t.answered_correctly_roll10sum, t.answered_incorrectly_roll10sum
-              t.lectures_cumcount, t.prior_question_elapsed_time_roll10avg
-            FROM (
-              SELECT user_id,
-                MAX(task_container_id) task_container_id,
-                SUM(answered_correctly) answered_correctly_cumsum,
-                SUM(answered_incorrectly) answered_incorrectly_cumsum,
-              FROM data.train
-              GROUP BY user_id
-              ORDER BY user_id
-              ) t
-            JOIN (
-              SELECT user_id,
-                MAX(answered_correctly_roll) answered_correctly_roll,
-                MAX(answered_incorrectly_roll) answered_incorrectly_roll
-              FROM (
-                SELECT user_id, task_container_id,
-                  SUM(answered_correctly) OVER w answered_correctly_roll,
-                  SUM(answered_incorrectly) OVER w answered_incorrectly_roll
-                FROM data.train t2
-                WINDOW w  AS (
-                    PARTITION BY user_id, content_id
-                    ORDER BY task_container_id
-                    RANGE BETWEEN 9 PRECEDING AND 0 PRECEDING
-                    )
-                ) ji
-               ) j
-            ON t.user_id = j.user_id
-            ORDER BY t.user_id
+        SELECT user_id, content_id,
+        {strings}
+        FROM data.train_sample t
+        JOIN (
+        SELECT row_id, DENSE_RANK() OVER (
+            PARTITION BY user_id, content_id
+            ORDER BY task_container_id DESC
+        ) r
+        FROM data.train_sample
+        ) j
+        ON j.row_id = t.row_id
+        WHERE j.r < 11
+        GROUP BY user_id, content_id 
+        ORDER BY user_id, content_id
         """, sys._getframe().f_code.co_name + '_'
     
     def select_user_roll_arrays(self, n_roll=11):
