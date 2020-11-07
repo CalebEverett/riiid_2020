@@ -42,6 +42,10 @@ class Git:
         self.password = password
         self.email = email
         self.repo_path = base_path/repo
+        self.cred_repo = (
+            f'https://{self.username}:{self.password}'
+            f'@github.com/{self.username}/{self.repo}.git'
+        )
         self.config()
     
     def config(self):
@@ -55,11 +59,6 @@ class Git:
     def clone(self, latest=False):
         cwd = os.getcwd()
         os.chdir(self.base_path)
-        
-        cred_repo = (
-            f'https://{self.username}:{self.password}'
-            f'@github.com/{self.username}/{self.repo}.git'
-        )
 
         if latest:
             cred_repo = f'--depth 1 {cred_repo}'
@@ -89,3 +88,6 @@ class Git:
 
     def push(self):
         self.command('push origin master')
+
+    def set_remote(self):
+        self.command(f'remote set-url origin {self.cred_repo}')
