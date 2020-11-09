@@ -68,7 +68,7 @@ class BQHelper:
                                     not_found_ok=True)
 
     def get_df_jobs(self, max_results=10):
-        jobs = self.bq_client.list_jobs(max_results=max_results)
+        jobs = self.bq_client.list_jobs(max_results=max_results, all_users=True)
         jobs_list = []
 
         if jobs.num_results:
@@ -88,7 +88,7 @@ class BQHelper:
         else:
             return None
 
-    def get_df_tables(self):
+    def get_df_table_list(self):
         tables = []
         for t in self.bq_client.list_tables(self.DATASET):
             table = self.bq_client.get_table(t)
@@ -119,6 +119,13 @@ class BQHelper:
         df_query = query_job.to_dataframe(dtypes=dtypes, 
                                 progress_bar_type='tqdm_notebook')
         return df_query
+
+    def get_df_table(self, table_id, max_results=10000, dtypes=None):
+        table = self.get_table(table_id)
+        df_table = (self.bq_client.list_rows(table, max_results=max_results)
+                    .to_dataframe(dtypes=dtypes,
+                                progress_bar_type='tqdm_notebook'))
+        return df_table
 
     # EXPORT FUNCTIONS
     # ================

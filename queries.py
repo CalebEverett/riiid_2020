@@ -90,60 +90,123 @@ class Queries:
             WHERE true;
         """, sys._getframe().f_code.co_name + '_'    
         
-    def update_train_window(self, table_id='train', source_column_id='answered_correctly',
-                         update_column_id=None, window=0, agg='SUM', part_content=False):
-        """Calculates aggregate over preceding task_container_ids, limited
-        to `window number` of task_container_ids unless window is 0 and then
-        includes all task_container_ids.
-        """
+    # def update_train_window_containers(self, table_id='train', source_column_id='answered_correctly',
+    #                      update_column_id=None, window=0, agg='SUM', part_content=False, preceding=1):
+    #     """Calculates aggregate over preceding task_container_ids, limited
+    #     to `window number` of task_container_ids unless window is 0 and then
+    #     includes all task_container_ids.
+    #     """
         
-        partition = 'user_id, content_id' if part_content else 'user_id'
+    #     partition = 'user_id, content_id' if part_content else 'user_id'
 
-        return f"""            
-            UPDATE {self.DATASET}.{table_id} t
-            SET {update_column_id} = source.calc
-            FROM (
-              SELECT row_id, {agg}({source_column_id})
-                OVER (
-                    PARTITION BY {partition}
-                    ORDER BY task_container_id
-                    RANGE BETWEEN {window if window else 'UNBOUNDED'} PRECEDING
-                        AND 1 PRECEDING
-                  ) calc
-              FROM {self.DATASET}.{table_id}
-              ORDER BY user_id, task_container_id, row_id
-              ) source
-             WHERE t.row_id = source.row_id;
+    #     return f"""            
+    #         UPDATE {self.DATASET}.{table_id} t
+    #         SET {update_column_id} = source.calc
+    #         FROM (
+    #           SELECT row_id, {agg}({source_column_id})
+    #             OVER (
+    #                 PARTITION BY {partition}
+    #                 ORDER BY task_container_id
+    #                 RANGE BETWEEN {window if window else 'UNBOUNDED'} PRECEDING
+    #                     AND {preceding} PRECEDING
+    #               ) calc
+    #           FROM {self.DATASET}.{table_id}
+    #           ORDER BY user_id, task_container_id, row_id
+    #           ) source
+    #          WHERE t.row_id = source.row_id;
 
-            UPDATE {self.DATASET}.{table_id}
-            SET {update_column_id} = 0
-            WHERE {update_column_id} IS NULL;
-        """, sys._getframe().f_code.co_name + '_'
+    #         UPDATE {self.DATASET}.{table_id}
+    #         SET {update_column_id} = 0
+    #         WHERE {update_column_id} IS NULL;
+    #     """, sys._getframe().f_code.co_name + '_'
     
-    def update_train_window_upto(self, table_id='train',
-                                 source_column_id='answered_correctly_cumsum',
-                                 update_column_id='answered_correctly_cumsum10',
-                                  window=10):
-        """Updates update_column_id with source_column_id for task_container_id
-        less than window and max of source_column_id less than task_container_id
-        for task_container_id greater than window.
-        """
-        
+    def update_train_window_containers(self, table_id='train'):
         return f"""            
-            UPDATE {self.DATASET}.{table_id}
-            SET {update_column_id} = {source_column_id}
-            WHERE task_container_id <= 10;
+        UPDATE {self.DATASET}.{table_id} t
+        SET answered_correctly_cumsum = IFNULL(calc.answered_correctly_cumsum, 0),
+            answered_incorrectly_cumsum = IFNULL(calc.answered_incorrectly_cumsum, 0),
+            lectures_cumcount = IFNULL(calc.lectures_cumcount, 0),
+            prior_question_elapsed_time_rollavg = IFNULL(calc.prior_question_elapsed_time_rollavg, 0),
+            answered_correctly_content_id_cumsum = IFNULL(calc.answered_correctly_content_id_cumsum, 0),
+            answered_incorrectly_content_id_cumsum = IFNULL(calc.answered_incorrectly_content_id_cumsum, 0)
+        FROM (
+        SELECT row_id,
+            SUM(answered_correctly) OVER (b) answered_correctly_cumsum,
+            SUM(answered_incorrectly) OVER (b) answered_incorrectly_cumsum,
+            SUM(content_type_id) OVER (b) lectures_cumcount,
+            AVG(prior_question_elapsed_time) OVER (c) prior_question_elapsed_time_rollavg,
+            SUM(answered_correctly) OVER (e) answered_correctly_content_id_cumsum,
+            SUM(answered_incorrectly) OVER (e) answered_incorrectly_content_id_cumsum
+        FROM {self.DATASET}.{table_id}
+        WINDOW
+            a AS (PARTITION BY user_id ORDER BY task_container_id),
+            b AS (a RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+            c AS (a RANGE BETWEEN 3 PRECEDING AND 0 PRECEDING),
+            d AS (PARTITION BY user_id, content_id ORDER BY task_container_id),
+            e AS (d RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        ORDER BY user_id, task_container_id, row_id
+        ) calc
+        WHERE calc.row_id = t.row_id
+        """, sys._getframe().f_code.co_name + '_'
 
-            UPDATE {self.DATASET}.{table_id} t
-            SET {update_column_id} = source.ac
-            FROM (
-                SELECT user_id, MAX(answered_correctly_cumsum) ac
-                FROM {self.DATASET}.{table_id}
-                WHERE task_container_id <= 10
-                GROUP BY user_id
-            ) source
-            WHERE task_container_id > 10
-              AND source.user_id = t.user_id;
+    def update_train_window_rows(self, table_id='train', window=10):
+        """Calculates aggregate over window number of rows with task_container_id
+        less than task_container_id of current row.
+        """
+
+        return f"""            
+        UPDATE {self.DATASET}.{table_id} u
+        SET answered_correctly_rollsum = IFNULL(calc.answered_correctly_rollsum, 0),
+            answered_incorrectly_rollsum = IFNULL(calc.answered_incorrectly_rollsum, 0)
+        FROM (
+        SELECT t.row_id,
+            COUNT(j2.row_id) row_id_rollcount,
+            SUM(j2.answered_correctly) answered_correctly_rollsum,
+            SUM(j2.answered_incorrectly) answered_incorrectly_rollsum,
+        FROM {self.DATASET}.{table_id} t
+        JOIN (
+            SELECT user_id, task_container_id, MIN(row_id) min_row
+            FROM {self.DATASET}.{table_id}
+            GROUP BY user_id, task_container_id
+        ) j ON (j.user_id = t.user_id AND j.task_container_id = t.task_container_id)
+        LEFT JOIN {self.DATASET}.{table_id} j2 ON (
+            j2.user_id = t.user_id
+            AND j2.task_container_id < t.task_container_id
+            AND j2.row_id >= (j.min_row - {window + 1})
+        )
+        GROUP BY t.user_id, t.task_container_id, t.row_id
+        ) calc
+        WHERE
+        calc.row_id = u.row_id
+        """, sys._getframe().f_code.co_name + '_'
+
+
+    def update_answered_correctly_cumsum_upto(self, table_id='train'):        
+        return f"""            
+        UPDATE {self.DATASET}.{table_id} t
+        SET answered_correctly_cumsum_upto = IF(row_number < 11, r.answered_correctly_cumsum, m.ac_max)
+        FROM (
+        SELECT user_id, row_id, answered_correctly_cumsum,
+            ROW_NUMBER() OVER(W) row_number,
+        FROM {self.DATASET}.{table_id}
+        WHERE content_type_id = 0
+        WINDOW
+            w AS (PARTITION BY user_id ORDER BY row_id)
+        ) r
+        JOIN (
+        SELECT user_id, MAX(answered_correctly_cumsum) ac_max
+        FROM (
+            SELECT user_id, row_id, answered_correctly_cumsum,
+            ROW_NUMBER() OVER(W) row_number,
+            FROM {self.DATASET}.{table_id}
+            WINDOW
+                w AS (PARTITION BY user_id ORDER BY row_id)
+        )
+        WHERE row_number < 11
+        GROUP BY user_id
+        ) m
+        ON (m.user_id = r.user_id)
+        WHERE r.row_id = t.row_id
         """, sys._getframe().f_code.co_name + '_'
 
     def update_correct_cumsum_pct(self, column_id_correct=None,
@@ -190,29 +253,20 @@ class Queries:
             WHERE row_id = {rows}
         """, sys._getframe().f_code.co_name + '_'
     
-    def select_user_final_state(self, user_column_ids=None, window=10, table_id='train'):
-        strings = []
-        for column_id, aggs in user_column_ids.items():
-            for agg in aggs:
-                strings.append(f'{agg}({column_id}) {column_id}_{agg.lower()}')
+    def select_user_final_state(self, specs_cumsum=None, specs_roll=None,
+                                window=10, table_id='train'):
         
-        strings = (',\n\t').join(strings)
+        def get_string(col=None, agg=None, name=None):
+            return f'{agg}({col}) { name}'
+        
+        strings_cumsum = (',\n\t').join([get_string(**s) for s in specs_cumsum])
+        strings_roll = (',\n\t').join([get_string(**s) for s in specs_roll])
 
         return f"""            
-        SELECT user_id, content_id,
-        {strings}
-        FROM data.train_sample t
-        JOIN (
-        SELECT row_id, DENSE_RANK() OVER (
-            PARTITION BY user_id, content_id
-            ORDER BY task_container_id DESC
-        ) r
+        SELECT user_id, content_id, SUM(answered_correctly) answered_correctly_cumsum,
+        SUM(answered_incorrectly) answered_incorrectly_cumsum,
         FROM data.train_sample
-        ) j
-        ON j.row_id = t.row_id
-        WHERE j.r < 11
-        GROUP BY user_id, content_id 
-        ORDER BY user_id, content_id
+        GROUP BY user_id, content_id
         """, sys._getframe().f_code.co_name + '_'
     
     def select_user_roll_arrays(self, n_roll=11):
