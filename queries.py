@@ -253,42 +253,46 @@ class Queries:
             WHERE row_id = {rows}
         """, sys._getframe().f_code.co_name + '_'
     
-    def select_user_final_state(self, specs_cumsum=None, specs_roll=None,
-                                window=10, table_id='train'):
-        
-        def get_string(col=None, agg=None, name=None):
-            return f'{agg}({col}) { name}'
-        
-        strings_cumsum = (',\n\t').join([get_string(**s) for s in specs_cumsum])
-        strings_roll = (',\n\t').join([get_string(**s) for s in specs_roll])
-
+    def select_user_final_state(self, table_id='train'):
         return f"""            
-        SELECT user_id, content_id, SUM(answered_correctly) answered_correctly_cumsum,
-        SUM(answered_incorrectly) answered_incorrectly_cumsum,
-        FROM data.train_sample
+        CREATE TEMP FUNCTION calcCorrectPct(c INT64, ic INT64) AS (
+        IFNULL(CAST(SAFE_DIVIDE(c, (c + ic)) * 100 AS INT64), 0)
+        );
+        
+        SELECT *, calcCorrectPct(answered_correctly_cumsum, answered_incorrectly_cumsum) answered_correctly_cumsum_pct,
+        calcCorrectPct(answered_correctly_rollsum, answered_incorrectly_rollsum) answered_correctly_rollsum_pct
+        FROM (
+        SELECT row_id, user_id, answered_correctly_cumsum_upto, content_type_id,
+            SUM(answered_correctly) OVER (b) answered_correctly_cumsum,
+            SUM(answered_incorrectly) OVER (b) answered_incorrectly_cumsum,
+            SUM(answered_correctly) OVER (d) answered_correctly_rollsum,
+            SUM(answered_incorrectly) OVER (d) answered_incorrectly_rollsum,
+            SUM(content_type_id) OVER (b) lectures_cumcount,
+            AVG(prior_question_elapsed_time) OVER (c) prior_question_elapsed_time_rollavg,
+            ROW_NUMBER() OVER(y) row_no_desc,
+            SUM(answered_correctly + answered_incorrectly) OVER (d) answer_row_id_rollcount,
+            SUM(answered_correctly + answered_incorrectly) OVER (c) time_row_id_rollcount,
+            SUM(answered_correctly + answered_incorrectly) OVER (a) question_row_id_rollcount,
+        FROM {self.DATASET}.{table_id}
+        WINDOW
+            x AS (PARTITION BY user_id),
+            y AS (x ORDER BY task_container_id DESC, row_id DESC),
+            a AS (x ORDER BY task_container_id),
+            b AS (a ROWS BETWEEN UNBOUNDED PRECEDING AND 0 PRECEDING),
+            c AS (a RANGE BETWEEN 3 PRECEDING AND 0 PRECEDING),
+            d AS (a ROWS BETWEEN 9 PRECEDING AND 0 PRECEDING)
+        )
+        WHERE row_no_desc = 1 AND content_type_id = 0
+        ORDER BY user_id
+        """, sys._getframe().f_code.co_name + '_'
+
+    def select_user_content_final_state(self, table_id='train'):
+        return f"""            
+        SELECT user_id, content_id, SUM(answered_correctly) answered_correctly_content_id_cumsum,
+        SUM(answered_incorrectly) answered_incorrectly_content_id_cumsum
+        FROM {self.DATASET}.{table_id}
+        WHERE content_type_id = 0
         GROUP BY user_id, content_id
+        ORDER BY user_id, content_id
         """, sys._getframe().f_code.co_name + '_'
     
-    def select_user_roll_arrays(self, n_roll=11):
-        """Work in progress. Still need to come up with a way to
-        efficiently update rolling statistics during test prediction
-        loop.
-        """
-        return f"""            
-            SELECT user_id, ARRAY_AGG(task_container_id) task_container_id_rolloff,
-                ARRAY_AGG(answered_correctly) answered_correctly_rolloff,
-                ARRAY_AGG(answered_incorrectly) answered_incorrectly_rolloff,
-            FROM (
-              SELECT user_id, task_container_id,
-                SUM(answered_correctly) answered_correctly,
-                SUM(answered_incorrectly) answered_incorrectly,
-                ROW_NUMBER() OVER(
-                  PARTITION BY user_id
-                  ORDER BY task_container_id DESC
-                  ) row_number
-              FROM data.train
-              GROUP BY user_id, task_container_id
-            ) t
-            WHERE t.row_number < {n_roll}
-            GROUP BY user_id
-        """, sys._getframe().f_code.co_name + '_'

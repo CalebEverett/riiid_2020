@@ -86,8 +86,8 @@ class Git:
     def status(self):
         self.command('status')
 
-    def push(self):
-        self.command('push origin master')
+    def push(self, branch='master'):
+        self.command(f'push origin {branch}')
 
     def set_remote(self):
         self.command(f'remote set-url origin {self.cred_repo}')
