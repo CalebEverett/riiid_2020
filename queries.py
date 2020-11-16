@@ -56,7 +56,7 @@ class Queries:
         return f"""
             SELECT {(', ').join(columns)}
             FROM {self.DATASET}.{table_id} t
-            LEFT JOIN data.questions q
+            LEFT JOIN {self.DATASET}.questions q
             ON t.content_id = q.question_id
             WHERE {where_condition}
             ORDER BY user_id, task_container_id, row_id
@@ -89,36 +89,6 @@ class Queries:
             SET tag__0 = tags[OFFSET(0)]
             WHERE true;
         """, sys._getframe().f_code.co_name + '_'    
-        
-    # def update_train_window_containers(self, table_id='train', source_column_id='answered_correctly',
-    #                      update_column_id=None, window=0, agg='SUM', part_content=False, preceding=1):
-    #     """Calculates aggregate over preceding task_container_ids, limited
-    #     to `window number` of task_container_ids unless window is 0 and then
-    #     includes all task_container_ids.
-    #     """
-        
-    #     partition = 'user_id, content_id' if part_content else 'user_id'
-
-    #     return f"""            
-    #         UPDATE {self.DATASET}.{table_id} t
-    #         SET {update_column_id} = source.calc
-    #         FROM (
-    #           SELECT row_id, {agg}({source_column_id})
-    #             OVER (
-    #                 PARTITION BY {partition}
-    #                 ORDER BY task_container_id
-    #                 RANGE BETWEEN {window if window else 'UNBOUNDED'} PRECEDING
-    #                     AND {preceding} PRECEDING
-    #               ) calc
-    #           FROM {self.DATASET}.{table_id}
-    #           ORDER BY user_id, task_container_id, row_id
-    #           ) source
-    #          WHERE t.row_id = source.row_id;
-
-    #         UPDATE {self.DATASET}.{table_id}
-    #         SET {update_column_id} = 0
-    #         WHERE {update_column_id} IS NULL;
-    #     """, sys._getframe().f_code.co_name + '_'
     
     def update_train_window_containers(self, table_id='train'):
         return f"""            
@@ -288,8 +258,8 @@ class Queries:
 
     def select_user_content_final_state(self, table_id='train'):
         return f"""            
-        SELECT user_id, content_id, SUM(answered_correctly) answered_correctly_content_id_cumsum,
-        SUM(answered_incorrectly) answered_incorrectly_content_id_cumsum
+        SELECT user_id, content_id, SUM(answered_correctly) answered_correctly,
+            SUM(answered_incorrectly) answered_incorrectly,
         FROM {self.DATASET}.{table_id}
         WHERE content_type_id = 0
         GROUP BY user_id, content_id
