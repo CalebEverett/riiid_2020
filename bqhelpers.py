@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import pytz
 import sys
@@ -71,22 +72,19 @@ class BQHelper:
         jobs = self.bq_client.list_jobs(max_results=max_results, all_users=True)
         jobs_list = []
 
-        if jobs.num_results:
-            for job in jobs:
-                ended = job.ended if job.ended else datetime.now(pytz.UTC)
-                exception = job.exception() if job.ended else None
-                jobs_list.append({'job_id': job.job_id, 'job_type': job.job_type,
-                            'started': job.started, 'ended': ended,
-                            'running': job.running(),
-                            'exception': exception,
-                            })
-            df_jobs = pd.DataFrame(jobs_list)
-            df_jobs['seconds'] = (df_jobs.ended - df_jobs.started).dt.seconds
-            df_jobs.started = df_jobs.started.astype(str).str[:16]
-            del df_jobs['ended']
-            return df_jobs
-        else:
-            return None
+        for job in jobs:
+            ended = job.ended if job.ended else datetime.now(pytz.UTC)
+            exception = job.exception() if job.ended else None
+            jobs_list.append({'job_id': job.job_id, 'job_type': job.job_type,
+                        'started': job.started, 'ended': ended,
+                        'running': job.running(),
+                        'exception': exception,
+                        })
+        df_jobs = pd.DataFrame(jobs_list)
+        df_jobs['seconds'] = (df_jobs.ended - df_jobs.started).dt.seconds
+        df_jobs.started = df_jobs.started.astype(str).str[:16]
+        del df_jobs['ended']
+        return df_jobs
 
     def get_df_table_list(self):
         tables = []
@@ -194,7 +192,7 @@ class BQHelper:
             n_files = len(list(file_paths[0].iterdir()))
             print(f'{n_files} file{"s" if n_files > 1 else ""} already '
                   f'exist{"s" if n_files == 1 else ""} locally for '
-                  f'table{prefix}.')
+                  f'table {prefix}.')
             
         return list(list(Path().glob(prefix))[0].iterdir())
 
@@ -212,10 +210,10 @@ class BQHelper:
         dfs = []
         if suffix == '.csv':
             for f in tqdm(file_paths, desc='Files Read: '):
-                dfs.append(pd.read_csv(f, dtype=dtypes))
+                dfs.append(pd.read_csv(f, dtype=dtypes, low_memory=False))
         else:
             for f in tqdm(file_paths, desc='Files Read: '):
-                dfs.append(pd.read_json(f, dtype=dtypes, lines=True))
+                dfs.append(pd.read_json(f, dtype=dtypes, lines=True, low_memory=False))
         
         df_train = pd.concat(dfs)
         
