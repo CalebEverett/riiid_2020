@@ -134,7 +134,7 @@ class BQHelper:
     # EXPORT FUNCTIONS
     # ================
     def export_query_gcs(self, query, file_format='csv', wait=True,
-                        use_query_cache=True):
+                        use_query_cache=True, header=True):
         """ Uses BigQuery temporary table reference as gcs prefix.
         Runs query and exports to gcs if it doesn't already exist in gcs.
         Exported in multiple files if over 1GB. Returns gcs prefix.
@@ -151,7 +151,8 @@ class BQHelper:
             formats={'csv': 'CSV',
                     'json': 'NEWLINE_DELIMITED_JSON'}
             
-            job_config = ExtractJobConfig(destination_format=formats[file_format])
+            job_config = ExtractJobConfig(destination_format=formats[file_format],
+                                          print_header=header)
             
             ex_job = self.bq_client.extract_table(
                 source=qj.destination,
@@ -201,7 +202,7 @@ class BQHelper:
                   f'exist{"s" if n_files == 1 else ""} locally for '
                   f'table {prefix}.')
             
-        return list(list(Path().glob(prefix))[0].iterdir())
+        return sorted(list(list(Path().glob(prefix))[0].iterdir()))
 
     def get_df_files(self, file_paths, dtypes):
         """ Creates data frame from list of local file paths.
