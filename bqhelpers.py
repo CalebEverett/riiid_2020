@@ -4,7 +4,7 @@ import pytz
 import sys
 
 from google.cloud.bigquery import ExtractJobConfig, LoadJobConfig, \
-    SchemaField, SourceFormat
+    QueryJobConfig, SchemaField, SourceFormat
 import pandas as pd
 from tqdm.notebook import tqdm
 
@@ -102,8 +102,14 @@ class BQHelper:
         seconds = (future.ended - future.started).total_seconds()
         print(f'Job {future.job_id} finished in {seconds} seconds.')
 
-    def run_query(self, query, job_id_prefix=None, wait=False):
-        query_job = self.bq_client.query(query, job_id_prefix=job_id_prefix)
+    def run_query(self, query, job_id_prefix=None, wait=False,
+                  use_query_cache=True):
+
+        job_config = QueryJobConfig(
+            use_query_cache=use_query_cache)
+
+        query_job = self.bq_client.query(query, job_id_prefix=job_id_prefix,
+                                         job_config=job_config)
         print(f'Job {query_job.job_id} started.')
         query_job.add_done_callback(self.done_cb)
         if wait:
@@ -127,12 +133,13 @@ class BQHelper:
 
     # EXPORT FUNCTIONS
     # ================
-    def export_query_gcs(self, query, file_format='csv', wait=True):
+    def export_query_gcs(self, query, file_format='csv', wait=True,
+                        use_query_cache=True):
         """ Uses BigQuery temporary table reference as gcs prefix.
         Runs query and exports to gcs if it doesn't already exist in gcs.
         Exported in multiple files if over 1GB. Returns gcs prefix.
         """
-        qj = self.run_query(*query, wait=wait)
+        qj = self.run_query(*query, wait=wait, use_query_cache=use_query_cache)
         
         prefix = ('/').join(qj.destination.path.split('/')[-2:])
         blobs_list = list(self.bucket.list_blobs(prefix=prefix))
@@ -213,7 +220,7 @@ class BQHelper:
                 dfs.append(pd.read_csv(f, dtype=dtypes, low_memory=False))
         else:
             for f in tqdm(file_paths, desc='Files Read: '):
-                dfs.append(pd.read_json(f, dtype=dtypes, lines=True, low_memory=False))
+                dfs.append(pd.read_json(f, dtype=dtypes, lines=True))
         
         df_train = pd.concat(dfs)
         

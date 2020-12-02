@@ -13,7 +13,7 @@ def run_command(command):
     """Runs command line command as a subprocess returning output as string."""
     STDOUT = subprocess.PIPE
     process = subprocess.run(command, shell=True, check=False,
-                             stdout=STDOUT, stderr=STDOUT, universal_newlines=True)
+                             stdout=STDOUT, stderr=STDOUT, universal_newlines=True, encoding='utf-8')
     
     output = process.stdout if process.stdout else process.stderr
     
@@ -34,6 +34,12 @@ def check_package(p, v):
 def check_packages(packages):
     for p, v in packages.items():
         check_package(p, v)
+
+def copy_file(src, dest, text=True):
+    if text:
+        dest.write_text(src.read_text())
+    else:
+        dest.write_bytes(src.read_bytes())
 
 class Git:
     def __init__(self, repo, username, password, email, base_path):
