@@ -26,8 +26,9 @@ def check_package(p, v):
     output = run_command(f'pip freeze | grep {p}==')
     if output == '':
         porc(f'pip install -q {p}')
-    elif get_v_tuple(output[output.find('==')+2:]) < get_v_tuple(v):
-        porc(f'pip install -q -U {p}')
+    elif get_v_tuple(output[output.find('==')+2:]) < get_v_tuple(v[0]):
+        
+        porc(f'pip install -q -U {p}{v[1]}')
     else:
         print_output(output)
 

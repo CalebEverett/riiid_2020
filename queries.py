@@ -113,7 +113,7 @@ class Queries:
     # ==== PRIMARY TRAIN DATAFRAME ====
     def select_train(self, columns=['*'], folds=[0],
                      excl_lectures=False, table_id='train',
-                     table_id_folds='folds', limit=None): 
+                     table_id_folds='folds', limit=None):
 
         folds = (' OR ').join([f'fold = {f}' for f  in folds])
         limit = f'LIMIT {limit}' if limit else ''
@@ -129,6 +129,26 @@ class Queries:
             {limit}
         """, sys._getframe().f_code.co_name + '_'
     
+    def select_train_one_hots(self, columns=['*'], folds=[0],
+                    excl_lectures=False, table_id='train',
+                    table_id_folds='folds', limit=None): 
+
+        folds = (' OR ').join([f'fold = {f}' for f  in folds])
+        limit = f'LIMIT {limit}' if limit else ''
+        excl_lectures = ' AND content_type_id = 0' if excl_lectures else ''
+
+        return f"""
+            SELECT {(', ').join(columns)}
+            FROM {self.DATASET}.{table_id} t
+            LEFT JOIN {self.DATASET}.content_tags ct
+            ON t.ql_id = ct.ql_id
+            LEFT JOIN {self.DATASET}.one_hots o
+            ON t.ql_id = o.ql_id
+            WHERE ({folds}){excl_lectures}
+            ORDER BY t.user_id, task_container_id, row_id
+            {limit}
+        """, sys._getframe().f_code.co_name + '_'
+
     def update_answered_correctly(self, table_id='train'):
         """Sets answered_correctly to 0 for lectures so window totals
         are caculated correctly, including lectures.
@@ -165,7 +185,12 @@ class Queries:
                 part_correct_pct INT64,
                 tag_0_correct_pct INT64,
                 question_id_correct_pct INT64,
-                tags_correct_pct int64
+                tag_0_part_correct_pct INT64,
+                tags_correct_pct int64,
+                part_pqet_avg INT64,
+                tag_0_pqet_avg INT64,
+                question_id_pqet_avg INT64,
+                tags_pqet_avg int64
             );
 
             INSERT INTO data.content_tags (ql_id, question_id, lecture_id, bundle_id, 
@@ -216,6 +241,82 @@ class Queries:
             WHERE t.content_id = ct.lecture_id
                 AND t.content_type_id = 1;
         """, sys._getframe().f_code.co_name + '_'
+
+    def update_content_tags_correct_pct(self, column_id=None):        
+        return f"""
+        UPDATE {self.DATASET}.content_tags c
+        SET {column_id}_correct_pct = calc.{column_id}_correct_pct
+        FROM (
+            SELECT
+                {column_id},
+                IFNULL(CAST(SUM(answered_correctly) * 100 / COUNT(answered_correctly) AS INT64), -1) {column_id}_correct_pct
+            FROM {self.DATASET}.train t
+            JOIN  {self.DATASET}.content_tags c2
+            ON t.ql_id = c2.ql_id AND t.content_type_id = 0
+            GROUP BY c2.{column_id}
+        ) calc
+        WHERE c.{column_id} = calc.{column_id}
+        """, sys._getframe().f_code.co_name + '_'
+
+    def update_content_tags_pqet_avg(self, column_id=None):        
+        return f"""
+        UPDATE {self.DATASET}.content_tags c
+        SET c.{column_id}_pqet_avg = IFNULL(CAST(pqet_avg AS INT64), -1)
+        FROM (
+            SELECT {column_id}, AVG(pqet_next) pqet_avg
+            FROM {self.DATASET}.train t
+            JOIN (
+                SELECT
+                    row_id, {column_id},
+                    LAST_VALUE(prior_question_elapsed_time) OVER (b) pqet_next
+                FROM {self.DATASET}.train t
+                JOIN {self.DATASET}.content_tags c
+                ON t.ql_id = c.ql_id
+                WHERE content_type_id = 0
+                WINDOW
+                    a AS (PARTITION BY user_id ORDER BY task_container_id),
+                    b AS (a RANGE BETWEEN 1 FOLLOWING AND 1 FOLLOWING)
+            ) calc
+            ON t.row_id = calc.row_id AND t.content_type_id = 0
+            GROUP BY {column_id}
+        ) n
+        WHERE c.{column_id} = n.{column_id}
+        """, sys._getframe().f_code.co_name + '_'
+
+    def update_content_tags_part_tag_correct_pct(self):     
+        return f"""
+        UPDATE {self.DATASET}.content_tags c
+        SET tag_0_part_correct_pct = IFNULL(CAST(SAFE_DIVIDE(ac_cumsum_part_tag * 100,
+                r_cumcnt_part_tag) AS INT64), -1)
+        FROM (
+        SELECT part, tag,
+            SUM(ac_cumsum_tags) ac_cumsum_part_tag,
+            SUM(r_cumcnt_tags) r_cumcnt_part_tag,
+            SUM(lectures_cumcnt_tags) lectures_cumcnt_part_tag
+        FROM (
+            WITH tags_table AS (
+                SELECT ql_id, part, tags, tags_array,
+                FROM {self.DATASET}.content_tags
+            )
+            SELECT user_id, task_container_id, row_id, part, tag,
+                IFNULL(SUM(answered_correctly) OVER(b), 0) ac_cumsum_tags,
+                IFNULL(SUM(CAST(content_type_id = 0 AS INT64)) OVER(b), 0) r_cumcnt_tags,
+                IFNULL(SUM(content_type_id) OVER(b), 0) lectures_cumcnt_tags
+            FROM tags_table
+            CROSS JOIN UNNEST(tags_table.tags_array) AS tag
+            JOIN data.train t
+            ON tags_table.ql_id = t.ql_id
+            WINDOW
+                a AS (PARTITION BY user_id, part, tag ORDER BY task_container_id),
+                b AS (a RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+            ORDER BY user_id, task_container_id, row_id, tag
+        )
+        GROUP BY tag, part
+        ORDER BY tag, part
+        ) calc
+        WHERE c.part = calc.part AND c.tag_0 = calc.tag AND c.lecture_id IS NULL
+        """, sys._getframe().f_code.co_name + '_'
+
 
     # def update_questions_tags_array(self):
     #     return f"""
@@ -273,7 +374,7 @@ class Queries:
         UPDATE {self.DATASET}.{table_id}
         SET
             pqet_sec_rollavg = 0, 
-            pqet_sec = 0, 
+            pqet_sec = 0
         WHERE content_type_id = 1;
         """, sys._getframe().f_code.co_name + '_'
 
@@ -289,13 +390,22 @@ class Queries:
             aic_cumsum_session = calc.r_cumcnt_session - calc.ac_cumsum_session,
             ac_cumsum_pct_session = IFNULL(CAST(SAFE_DIVIDE(calc.ac_cumsum_session * 100,
                  calc.r_cumcnt_session) AS INT64), -1),
-            lectures_cumcnt_session = calc.lectures_cumcnt_session
+            lectures_cumcnt_session = calc.lectures_cumcnt_session,
+            ac_rollsum_session = calc.ac_rollsum_session,
+            r_rollcnt_session = calc.r_cumcnt_session,
+            aic_rollsum_session = calc.r_rollcnt_session - calc.ac_rollsum_session,
+            ac_rollsum_pct_session = IFNULL(CAST(SAFE_DIVIDE(calc.ac_rollsum_session * 100,
+                 calc.r_rollcnt_session) AS INT64), -1),
+            lectures_rollcnt_session = calc.lectures_rollcnt_session
         FROM (
             SELECT
                 row_id, session_minute_max, session,
                 IFNULL(SUM(answered_correctly) OVER (f), 0) ac_cumsum_session,
                 IFNULL(SUM(CAST(content_type_id = 0 AS INT64)) OVER (f), 0) r_cumcnt_session,
-                IFNULL(SUM(content_type_id) OVER (f), 0) lectures_cumcnt_session
+                IFNULL(SUM(content_type_id) OVER (f), 0) lectures_cumcnt_session,
+                IFNULL(SUM(answered_correctly) OVER (g), 0) ac_rollsum_session,
+                IFNULL(SUM(CAST(content_type_id = 0 AS INT64)) OVER (g), 0) r_rollcnt_session,
+                IFNULL(SUM(content_type_id) OVER (g), 0) lectures_rollcnt_session
             FROM (
                 SELECT
                     user_id, task_container_id, row_id, answered_correctly, content_type_id,
@@ -305,11 +415,11 @@ class Queries:
                     SELECT
                         user_id, task_container_id, row_id, timestamp, answered_correctly, content_type_id,
                         IFNULL(CAST(ROUND((MAX(timestamp) OVER(b) / 60000)) AS INT64), 0) ts_minute_rollmax,
-                        IF((timestamp - MAX(timestamp) OVER(b)) > (1000 * 60 * 60 * {session_hours}), 1, 0) session_flag
+                        IF((timestamp - LAST_VALUE(timestamp) OVER(b)) > (1000 * 60 * 60 * {session_hours}), 1, 0) session_flag
                     FROM {self.DATASET}.{table_id}
                     WINDOW
-                        a AS (PARTITION BY user_id ORDER BY task_container_id),
-                        b AS (a RANGE BETWEEN 1 PRECEDING AND 1 PRECEDING)
+                        a AS (PARTITION BY user_id ORDER BY timestamp),
+                        b AS (a ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING)
                 )
                 WINDOW
                     c AS (PARTITION BY user_id ORDER BY task_container_id),
@@ -317,10 +427,14 @@ class Queries:
             )
             WINDOW
                 e AS (PARTITION BY user_id, session ORDER BY task_container_id),
-                f AS (e RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) 
+                f AS (e RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                g AS (e RANGE BETWEEN 10 PRECEDING AND 1 PRECEDING)
         ) calc
         WHERE calc.row_id = t.row_id
         """, sys._getframe().f_code.co_name + '_'
+
+        # session_minute_max set to average right now, need to put in r_cumcnt in the average in 
+        # order to calc for predictions
 
     def update_train_window_containers(self, table_id='train'):
         return f"""
@@ -516,33 +630,21 @@ class Queries:
         WHERE t.user_id = m.user_id
         """, sys._getframe().f_code.co_name + '_'
 
-    def update_content_tags_correct_pct(self, column_id=None):        
-        return f"""
-        UPDATE {self.DATASET}.content_tags c
-        SET {column_id}_correct_pct = calc.{column_id}_correct_pct
-        FROM (
-            SELECT
-                {column_id},
-                IFNULL(CAST(SUM(answered_correctly) * 100 / COUNT(answered_correctly) AS INT64), -1) {column_id}_correct_pct
-            FROM {self.DATASET}.train t
-            JOIN  {self.DATASET}.content_tags c2
-            ON t.ql_id = c2.ql_id AND t.content_type_id = 0
-            GROUP BY c2.{column_id}
-        ) calc
-        WHERE c.{column_id} = calc.{column_id}
-        """, sys._getframe().f_code.co_name + '_'
-
     def select_user_final_state(self, table_id='train', no_upto=10):
         return f"""            
 
         SELECT t.user_id, ac_cumsum, ac_cumsum_upto,
             r_cumcnt - ac_cumsum aic_cumsum,
             r_cumcnt_upto - ac_cumsum_upto aic_cumsum_upto,
-            lectures_cumcnt, r_cumcnt, r_cumcnt_upto
+            lectures_cumcnt, r_cumcnt, r_cumcnt_upto, session, timestamp,
+            ac_cumsum_session, aic_cumsum_session, r_cumcnt_session,
+            lectures_cumcnt_session
         FROM (
             SELECT user_id, SUM(answered_correctly) ac_cumsum,
                     SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt,
-                    SUM(content_type_id) lectures_cumcnt
+                    SUM(content_type_id) lectures_cumcnt,
+                    MAX(session) session,
+                    MAX(timestamp) timestamp
             FROM {self.DATASET}.{table_id}
             GROUP BY user_id
             ORDER BY user_id
@@ -557,10 +659,29 @@ class Queries:
                 w AS (PARTITION BY user_id ORDER BY row_id DESC)
             ORDER BY user_id
         ) u ON t.user_id = u.user_id AND u.row_number = 1
+        JOIN (
+            SELECT
+                t2.user_id,
+                SUM(answered_correctly) ac_cumsum_session,
+                SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_session,
+                SUM(CAST(content_type_id = 0 AS INT64)) - SUM(answered_correctly) aic_cumsum_session,
+                SUM(content_type_id) lectures_cumcnt_session
+            FROM {self.DATASET}.{table_id} t2
+            JOIN (
+                SELECT
+                    user_id,
+                    MAX(session) session
+                FROM {self.DATASET}.{table_id}
+                GROUP BY user_id
+            ) calc
+            ON t2.user_id = calc.user_id
+                AND t2.session = calc.session
+            GROUP BY user_id
+        ) s ON t.user_id = s.user_id
         ORDER BY user_id
         """, sys._getframe().f_code.co_name + '_'
 
-    def select_user_content_final_state(self, table_id='train'):
+    def select_users_content_final_state(self, table_id='train'):
         return f"""
         SELECT user_id, content_id,
             SUM(answered_correctly) ac_cumsum_content_id,
@@ -587,4 +708,18 @@ class Queries:
         ON t.ql_id = tags_table.ql_id
         GROUP BY user_id, tag
         ORDER BY user_id, tag
+        """, sys._getframe().f_code.co_name + '_'
+
+    def select_users_part_final_state(self, table_id='train'):
+        return f"""
+        SELECT user_id, part,
+            SUM(answered_correctly) ac_cumsum_part,
+            SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_part,
+            SUM(CAST(content_type_id = 0 AS INT64)) - SUM(answered_correctly) aic_cumsum_part,
+            SUM(content_type_id) lectures_cumcnt_part
+        FROM {self.DATASET}.{table_id} t
+        JOIN {self.DATASET}.content_tags c
+        ON t.ql_id = c.ql_id
+        GROUP BY user_id, part
+        ORDER BY user_id, part
         """, sys._getframe().f_code.co_name + '_'
