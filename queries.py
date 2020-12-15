@@ -30,6 +30,22 @@ class Queries:
             WHERE target.row_id = t.row_id
         """, sys._getframe().f_code.co_name + '_'
 
+    def update_task_container_id_q(self, table_id='train'):
+        return f"""
+            UPDATE {self.DATASET}.{table_id} t
+            SET task_container_id_q = target.calc
+            FROM (
+              SELECT row_id, DENSE_RANK()
+                OVER (
+                  PARTITION BY user_id
+                  ORDER BY timestamp
+                ) - 1 calc
+              FROM {self.DATASET}.{table_id}
+              WHERE content_type_id = 0
+            ) target
+            WHERE target.row_id = t.row_id
+        """, sys._getframe().f_code.co_name + '_'
+    
     def create_table_folds(self, table_id='folds', n_folds=40,
                             pct_beg=0.1, pct_late=0.6, pct_late_start=0.5):
         return f"""
@@ -101,6 +117,18 @@ class Queries:
             AND t.task_container_id >= f.task_container_id_min
         """, sys._getframe().f_code.co_name + '_'
     
+
+    def update_folds_all(self, table_id='train', table_id_folds='folds'):
+        return f"""
+        UPDATE {self.DATASET}.{table_id} t
+        SET t.fold = f.fold 
+        FROM {self.DATASET}.{table_id_folds} f
+        WHERE t.user_id = f.user_id_s
+            AND t.task_container_id >= f.task_container_id_min
+        """, sys._getframe().f_code.co_name + '_'
+    
+    
+    
     def create_train_sample(self, table_id='train_sample', user_id_max=50000):
         return f"""
             CREATE TABLE {self.DATASET}.{table_id} AS
@@ -113,18 +141,21 @@ class Queries:
     # ==== PRIMARY TRAIN DATAFRAME ====
     def select_train(self, columns=['*'], folds=[0],
                      excl_lectures=False, table_id='train',
-                     table_id_folds='folds', limit=None):
+                     table_id_folds='folds', limit=None, null_fold=False):
 
         folds = (' OR ').join([f'fold = {f}' for f  in folds])
         limit = f'LIMIT {limit}' if limit else ''
         excl_lectures = ' AND content_type_id = 0' if excl_lectures else ''
+        null_fold = ' OR fold IS NULL' if null_fold else ''
 
         return f"""
             SELECT {(', ').join(columns)}
             FROM {self.DATASET}.{table_id} t
             LEFT JOIN {self.DATASET}.content_tags ct
             ON t.ql_id = ct.ql_id
-            WHERE ({folds}){excl_lectures}
+            LEFT JOIN {self.DATASET}.roll_stats r
+            ON t.row_id = r.row_id_r
+            WHERE ({folds}{null_fold}){excl_lectures}
             ORDER BY t.user_id, task_container_id, row_id
             {limit}
         """, sys._getframe().f_code.co_name + '_'
@@ -227,6 +258,70 @@ class Queries:
             WHERE tag = tags;
         """, sys._getframe().f_code.co_name + '_'    
 
+    def create_roll_stats(self, win_lens, calc_list, table_id='roll_stats'):
+        wins = list(zip(win_lens, 'abcdefghij'))
+
+        col_list = [c.split()[-1] for c in calc_list]
+        col_list = [c.format(win_len=win_len) for c in col_list for win_len, _ in wins]
+        create_list = [f'{c} INT64' for c in col_list]
+
+        calc_list = [c.format(win_len=win_len, win_label=win_label)
+                     for c in calc_list for win_len, win_label in wins]
+
+        window_list = [f'{win_label} AS (w RANGE BETWEEN {win_len} PRECEDING AND 1 PRECEDING)' for win_len, win_label in wins]
+
+        return f"""
+        DROP TABLE IF EXISTS {self.DATASET}.{table_id};
+
+        CREATE TABLE {self.DATASET}.{table_id} (
+            row_id_r INT64,
+            {(',').join(create_list)}
+        );
+
+        INSERT INTO {self.DATASET}.{table_id}
+            (row_id_r, {(',').join(col_list)})
+        SELECT
+            row_id,
+            {(',').join(calc_list)}
+        FROM {self.DATASET}.train
+        WHERE task_container_id_q IS NOT NULL
+        WINDOW
+            w AS (PARTITION BY user_id ORDER BY task_container_id_q),
+            {(',').join(window_list)}
+        """, sys._getframe().f_code.co_name + '_'  
+    
+    def update_roll_stats_lectures(self, win_lens, calc_list, table_id='roll_stats'):
+        wins = list(zip(win_lens, 'abcdefghij'))
+
+        col_list = [c.split()[-1] for c in calc_list]
+        col_list = [c.format(win_len=win_len) for c in col_list for win_len, _ in wins]
+        create_list = [f'ADD COLUMN {c} INT64' for c in col_list]
+        set_list = [f'{c} = calc.{c}' for c in col_list]
+
+        calc_list = [c.format(win_len=win_len, win_label=win_label)
+                     for c in calc_list for win_len, win_label in wins]
+
+        window_list = [f'{win_label} AS (w RANGE BETWEEN {win_len} PRECEDING AND 1 PRECEDING)' for win_len, win_label in wins]
+
+        return f"""
+        ALTER TABLE {self.DATASET}.{table_id}
+            {(',').join(create_list)};
+            
+        UPDATE {self.DATASET}.{table_id} r
+        SET
+            {(',').join(set_list)}
+        FROM (
+            SELECT
+                row_id,
+                {(',').join(calc_list)}
+            FROM {self.DATASET}.train
+            WINDOW
+                w AS (PARTITION BY user_id ORDER BY task_container_id),
+                {(',').join(window_list)}
+        ) calc
+        WHERE row_id = row_id_r;
+        """, sys._getframe().f_code.co_name + '_'
+    
     def update_ql_id(self, table_id='train', table_id_ct='content_tags'):
         return f"""
             UPDATE {self.DATASET}.{table_id} t
@@ -274,7 +369,7 @@ class Queries:
                 ON t.ql_id = c.ql_id
                 WHERE content_type_id = 0
                 WINDOW
-                    a AS (PARTITION BY user_id ORDER BY task_container_id),
+                    a AS (PARTITION BY user_id ORDER BY task_container_id_q),
                     b AS (a RANGE BETWEEN 1 FOLLOWING AND 1 FOLLOWING)
             ) calc
             ON t.row_id = calc.row_id AND t.content_type_id = 0
@@ -316,42 +411,6 @@ class Queries:
         ) calc
         WHERE c.part = calc.part AND c.tag_0 = calc.tag AND c.lecture_id IS NULL
         """, sys._getframe().f_code.co_name + '_'
-
-
-    # def update_questions_tags_array(self):
-    #     return f"""
-    #         UPDATE {self.DATASET}.questions
-    #         SET tags_array = ARRAY(
-    #             SELECT CAST(tag AS INT64)
-    #             FROM UNNEST(SPLIT(tags, ' ')) tag
-    #         )
-    #         WHERE true;
-    #     """, sys._getframe().f_code.co_name + '_'
-    
-    # def update_questions_tag__0(self):
-    #     return f"""
-    #         UPDATE {self.DATASET}.content_tags
-    #         SET tag__0 = tags_array[OFFSET(0)]
-    #         WHERE true;
-    #     """, sys._getframe().f_code.co_name + '_'
-
-    # def update_questions_tags_code(self):
-    #     return f"""
-    #     UPDATE {self.DATASET}.questions
-    #     SET tags_code = idx
-    #     FROM (
-    #         SELECT idx - 1 idx, tag
-    #         FROM (
-    #             WITH unique_tags AS (SELECT DISTINCT tags tag
-    #             FROM {self.DATASET}.questions
-    #             ORDER BY tags
-    #             )
-    #             SELECT tag, ROW_NUMBER() OVER(ORDER BY tag) idx
-    #             FROM unique_tags
-    #         )
-    #     )
-    #     WHERE tag = tags;
-    #     """, sys._getframe().f_code.co_name + '_'
     
     def update_train_window_containers_pqet(self, table_id='train'):
         return f"""
@@ -409,7 +468,7 @@ class Queries:
             FROM (
                 SELECT
                     user_id, task_container_id, row_id, answered_correctly, content_type_id,
-                    CAST(MAX(ROUND(timestamp / 60000) - ts_minute_rollmax) OVER (d) AS INT64) session_minute_max,
+                    CAST(AVG(timestamp / 60000 - ts_minute_rollmax) OVER (d) AS INT64) session_minute_max,
                     IFNULL(SUM(session_flag) OVER (c), 0) session
                 FROM (
                     SELECT
@@ -423,7 +482,7 @@ class Queries:
                 )
                 WINDOW
                     c AS (PARTITION BY user_id ORDER BY task_container_id),
-                    d AS (c RANGE BETWEEN 10 PRECEDING AND 0 PRECEDING)
+                    d AS (c RANGE BETWEEN 3 PRECEDING AND 0 PRECEDING)
             )
             WINDOW
                 e AS (PARTITION BY user_id, session ORDER BY task_container_id),
@@ -607,6 +666,31 @@ class Queries:
         WHERE
         calc.row_id = u.row_id
         """, sys._getframe().f_code.co_name + '_'
+
+    def update_top_cids(self, top_content_ids):
+        def get_top_c_q(it):
+            i, t = it
+            return (f'ac_cumsum_pct_top_cid_{i} = CAST(IFNULL(SAFE_DIVIDE(ac_cumsum_top_cid_{i} * 100, r_cumcnt_top_cid_{i}), -1) AS INT64)',
+                    f'SUM(CAST(answered_correctly = 1 AND content_id = {t} AS INT64)) OVER (w) ac_cumsum_top_cid_{i},'
+                    f'SUM(CAST(content_id = {t} AS INT64)) OVER (w) r_cumcnt_top_cid_{i}')
+
+        sets, calcs = list(map(list, zip(*map(get_top_c_q, enumerate(top_content_ids)))))
+
+        return f"""
+        UPDATE {self.DATASET}.train t
+        SET
+          {(',').join(sets)}
+        FROM (
+          SELECT
+            row_id,
+            {(',').join(calcs)}
+          FROM {self.DATASET}.train
+          WINDOW
+            w AS (PARTITION BY user_id ORDER BY task_container_id
+            RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        ) calc
+        WHERE t.row_id = calc.row_id
+        """, sys._getframe().f_code.co_name + '_'  
 
     def update_answered_correctly_cumsum_upto(self, table_id='train', no_upto=10):        
         return f"""            

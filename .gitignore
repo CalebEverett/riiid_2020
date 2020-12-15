@@ -4,5 +4,9 @@ __pycache__/
 *$py.class
 *.db
 *.pkl
+*.npy
 tables
+models
 *checkpoint.ipynb
+riiid-submission-private
+submit_kernel
