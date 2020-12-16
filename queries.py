@@ -106,12 +106,12 @@ class Queries:
     def update_ts_delta(self, table_id='train'):
         return f"""
             UPDATE {self.DATASET}.{table_id} t
-            SET t.ts_delta = timestamp - p.ts_delta
+            SET t.ts_delta = IFNULL(timestamp - p.ts_prior, -1)
             FROM (
                 SELECT
                 row_id, LAST_VALUE(timestamp) OVER (
                   PARTITION BY user_id ORDER BY task_container_id_q
-                  RANGE BETWEEN 1 PRECEDING AND 1 PRECEDING) ts_delta
+                  RANGE BETWEEN 1 PRECEDING AND 1 PRECEDING) ts_prior
                 FROM {self.DATASET}.train            
                 WHERE content_type_id = 0
             ) p
@@ -329,10 +329,13 @@ class Queries:
                 SAFE_DIVIDE(
                     IF(r_cumcnt <= {no_upto}, ac_cumsum, m.ac_max) * 100,
                     IF(r_cumcnt <= {no_upto}, r_cumcnt, m.rc_max)
-                ) AS INT64), -1)
+                ) AS INT64), -1),
+           pqet_cumavg_upto = CAST(IF(r_cumcnt <= {no_upto},
+               pqet_cumavg, m.pqet_cumavg_upto) AS INT64)
         FROM (
             SELECT user_id, MAX(ac_cumsum) ac_max,
                 MAX(r_cumcnt) rc_max,
+                AVG(pqet_current) pqet_cumavg_upto
             FROM {self.DATASET}.{table_id}
             WHERE r_cumcnt <= {no_upto}
             GROUP BY user_id
@@ -358,6 +361,31 @@ class Queries:
           ORDER BY user_id, task_container_id, row_id, part, tag
         )
         """, sys._getframe().f_code.co_name + '_'
+    
+    def update_top_cids(self, top_content_ids):
+        def get_top_c_q(it):
+            i, t = it
+            return (f'ac_cumsum_pct_top_cid_{i} = CAST(IFNULL(SAFE_DIVIDE(ac_cumsum_top_cid_{i} * 100, r_cumcnt_top_cid_{i}), -1) AS INT64)',
+                    f'SUM(CAST(answered_correctly = 1 AND content_id = {t} AS INT64)) OVER (w) ac_cumsum_top_cid_{i},'
+                    f'SUM(CAST(content_id = {t} AS INT64)) OVER (w) r_cumcnt_top_cid_{i}')
+
+        sets, calcs = list(map(list, zip(*map(get_top_c_q, enumerate(top_content_ids)))))
+
+        return f"""
+        UPDATE {self.DATASET}.train t
+        SET
+          {(',').join(sets)}
+        FROM (
+          SELECT
+            row_id,
+            {(',').join(calcs)}
+          FROM {self.DATASET}.train
+          WINDOW
+            w AS (PARTITION BY user_id ORDER BY task_container_id
+            RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        ) calc
+        WHERE t.row_id = calc.row_id
+        """, sys._getframe().f_code.co_name + '_'      
     
     def update_train_window_rows(self, table_id='train', window=10):
         """Calculates aggregate over window number of rows with task_container_id
@@ -538,7 +566,8 @@ class Queries:
             {(',').join(window_list)}
         """, sys._getframe().f_code.co_name + '_'  
     
-    def update_roll_stats_lectures(self, win_lens, calc_list, n_prec=0, table_id='roll_stats'):
+    def update_roll_stats(self, win_lens, calc_list, n_prec=0,
+                          table_id='roll_stats', tid_col='task_container_id'):
         wins = list(zip(win_lens, 'abcdefghij'))
 
         col_list = [c.split()[-1] for c in calc_list]
@@ -564,7 +593,7 @@ class Queries:
                 {(',').join(calc_list)}
             FROM {self.DATASET}.train
             WINDOW
-                w AS (PARTITION BY user_id ORDER BY task_container_id),
+                w AS (PARTITION BY user_id ORDER BY {tid_col}),
                 {(',').join(window_list)}
         ) calc
         WHERE row_id = row_id_r;
@@ -574,31 +603,45 @@ class Queries:
     # ===========================
     # ===== TOP CONTENT_IDS =====
     # ===========================
-    
-    def update_top_cids(self, top_content_ids):
-        def get_top_c_q(it):
-            i, t = it
-            return (f'ac_cumsum_pct_top_cid_{i} = CAST(IFNULL(SAFE_DIVIDE(ac_cumsum_top_cid_{i} * 100, r_cumcnt_top_cid_{i}), -1) AS INT64)',
-                    f'SUM(CAST(answered_correctly = 1 AND content_id = {t} AS INT64)) OVER (w) ac_cumsum_top_cid_{i},'
-                    f'SUM(CAST(content_id = {t} AS INT64)) OVER (w) r_cumcnt_top_cid_{i}')
+    def create_top_content_ids(self, top_content_ids, table_id='top_content_ids'):
+        calc_list = [
+            'IFNULL(SUM(CAST(answered_correctly = 1 AND content_id = {cid} AS INT64)) OVER (w), 0) ac_cumsum_top_cid_{cid}',
+            'IFNULL(SUM(CAST(content_id = {cid} AS INT64)) OVER (w), 0) r_cumcnt_top_cid_{cid}'
+        ]
 
-        sets, calcs = list(map(list, zip(*map(get_top_c_q, enumerate(top_content_ids)))))
+        col_list = [c.split()[-1] for c in calc_list]
+        col_list = [c.format(cid=cid) for c in col_list for cid in top_content_ids]
+        create_list = [f'{c} INT64' for c in col_list + [f'ac_cumsum_pct_top_cid_{cid}' for cid in top_content_ids]]
+
+        calc_list = [c.format(cid=cid) for c in calc_list for cid in top_content_ids]
+
+        set_pct = 'ac_cumsum_pct_top_cid_{cid} = CAST(IFNULL(SAFE_DIVIDE(ac_cumsum_top_cid_{cid} * 100, r_cumcnt_top_cid_{cid}), -1) AS INT64)'
+
+        set_list =[set_pct.format(cid=cid) for cid in top_content_ids]
 
         return f"""
-        UPDATE {self.DATASET}.train t
-        SET
-          {(',').join(sets)}
-        FROM (
-          SELECT
+        DROP TABLE IF EXISTS {self.DATASET}.{table_id};
+
+        CREATE TABLE {self.DATASET}.{table_id} (
+            row_id_tc INT64,
+            {(',').join(create_list)}
+        );
+
+        INSERT INTO {self.DATASET}.{table_id}
+            (row_id_tc, {(',').join(col_list)})
+        SELECT
             row_id,
-            {(',').join(calcs)}
-          FROM {self.DATASET}.train
+            {(',').join(calc_list)}
+                  FROM {self.DATASET}.train
           WINDOW
-            w AS (PARTITION BY user_id ORDER BY task_container_id
-            RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
-        ) calc
-        WHERE t.row_id = calc.row_id
-        """, sys._getframe().f_code.co_name + '_'  
+            w AS (PARTITION BY user_id ORDER BY task_container_id_q
+                RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING);
+
+        UPDATE {self.DATASET}.{table_id}
+        SET
+            {(',').join(set_list)}
+        WHERE true;
+        """, sys._getframe().f_code.co_name + '_'
 
 
     # =================
@@ -682,7 +725,9 @@ class Queries:
             ON t.ql_id = ct.ql_id
             LEFT JOIN {self.DATASET}.roll_stats r
             ON t.row_id = r.row_id_r
-            WHERE ({folds}{null_fold}){excl_lectures}
+            LEFT JOIN {self.DATASET}.top_content_ids tc
+            ON t.row_id = tc.row_id_tc
+            WHERE ({folds}{null_fold}){excl_lectures}            
             ORDER BY t.user_id, task_container_id, row_id
             {limit}
         """, sys._getframe().f_code.co_name + '_'
@@ -721,61 +766,80 @@ class Queries:
     # ===== STATE TABLES =====
     # ========================
     
-    # roll_stats - to start with going to take the last row
-    # top_cids are already in the tags table - just need to pass the ids
-    def select_user_final_state(self, table_id='train', no_upto=10):
-        return f"""            
-
-        SELECT t.user_id, ac_cumsum, ac_cumsum_upto,
-            l_cumcnt, r_cumcnt, r_cumcnt_upto, session, timestamp,
-            ac_cumsum_session, r_cumcnt_session,
-            l_cumcnt_session
-        FROM (
-            SELECT user_id, SUM(answered_correctly) ac_cumsum,
-                    SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt,
-                    SUM(content_type_id) l_cumcnt,
-                    MAX(session) session,
-                    MAX(timestamp) timestamp
-            FROM {self.DATASET}.{table_id}
-            GROUP BY user_id
-            ORDER BY user_id
-        ) t
-        JOIN (
-            SELECT user_id, FIRST_VALUE(ac_cumsum_upto) OVER(w) ac_cumsum_upto,
-                 FIRST_VALUE(r_cumcnt_upto) OVER(w) r_cumcnt_upto,
-                 ROW_NUMBER() OVER (w) row_number
-            FROM {self.DATASET}.train
-            WHERE r_cumcnt_upto <= {no_upto}
-            WINDOW
-                w AS (PARTITION BY user_id ORDER BY row_id DESC)
-            ORDER BY user_id
-        ) u ON t.user_id = u.user_id AND u.row_number = 1
-        JOIN (
-            SELECT
-                t2.user_id,
-                SUM(answered_correctly) ac_cumsum_session,
-                SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_session,
-                SUM(content_type_id) l_cumcnt_session
-            FROM {self.DATASET}.{table_id} t2
-            JOIN (
-                SELECT
-                    user_id,
-                    MAX(session) session
-                FROM {self.DATASET}.{table_id}
-                GROUP BY user_id
-            ) calc
-            ON t2.user_id = calc.user_id
-                AND t2.session = calc.session
-            GROUP BY user_id
-        ) s ON t.user_id = s.user_id
+    def select_user_final_state(self, columns=None):
+        return f"""
+        WITH sorted_records AS (
+          SELECT *, ROW_NUMBER() OVER (w) row_num
+          FROM {self.DATASET}.train t
+          JOIN {self.DATASET}.roll_stats r
+          ON t.row_id = r.row_id_r
+          JOIN {self.DATASET}.top_content_ids tc
+          ON t.row_id = tc.row_id_tc 
+          WINDOW
+            w AS (PARTITION BY user_id ORDER BY row_id DESC)
+        )
+        SELECT {(', ').join(columns)}
+        FROM sorted_records
+        WHERE row_num = 1
         ORDER BY user_id
-        """, sys._getframe().f_code.co_name + '_'
+        """, sys._getframe().f_code.co_name + '_'    
+    
+#     # roll_stats - to start with going to take the last row
+#     # top_cids are already in the tags table - just need to pass the ids
+#     def select_user_final_state(self, table_id='train', no_upto=10):
+#         return f"""            
+
+#         SELECT t.user_id, ac_cumsum, ac_cumsum_upto,
+#             l_cumcnt, r_cumcnt, r_cumcnt_upto, session, timestamp,
+#             ac_cumsum_session, r_cumcnt_session,
+#             l_cumcnt_session
+#         FROM (
+#             SELECT user_id, SUM(answered_correctly) ac_cumsum,
+#                     SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt,
+#                     SUM(content_type_id) l_cumcnt,
+#                     MAX(session) session,
+#                     MAX(timestamp) timestamp
+#             FROM {self.DATASET}.{table_id}
+#             GROUP BY user_id
+#             ORDER BY user_id
+#         ) t
+#         JOIN (
+#             SELECT user_id, FIRST_VALUE(ac_cumsum_upto) OVER(w) ac_cumsum_upto,
+#                  FIRST_VALUE(r_cumcnt_upto) OVER(w) r_cumcnt_upto,
+#                  ROW_NUMBER() OVER (w) row_number
+#             FROM {self.DATASET}.train
+#             WHERE r_cumcnt_upto <= {no_upto}
+#             WINDOW
+#                 w AS (PARTITION BY user_id ORDER BY row_id DESC)
+#             ORDER BY user_id
+#         ) u ON t.user_id = u.user_id AND u.row_number = 1
+#         JOIN (
+#             SELECT
+#                 t2.user_id,
+#                 SUM(answered_correctly) ac_cumsum_session,
+#                 SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_session,
+#                 SUM(content_type_id) l_cumcnt_session
+#             FROM {self.DATASET}.{table_id} t2
+#             JOIN (
+#                 SELECT
+#                     user_id,
+#                     MAX(session) session
+#                 FROM {self.DATASET}.{table_id}
+#                 GROUP BY user_id
+#             ) calc
+#             ON t2.user_id = calc.user_id
+#                 AND t2.session = calc.session
+#             GROUP BY user_id
+#         ) s ON t.user_id = s.user_id
+#         ORDER BY user_id
+#         """, sys._getframe().f_code.co_name + '_'
 
     def select_users_content_final_state(self, table_id='train'):
         return f"""
         SELECT user_id, content_id,
             SUM(answered_correctly) ac_cumsum_content_id,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_content_id,
+            IFNULL(CAST(AVG(pqet_current) AS INT64), -1) pqet_cumavg_content_id
         FROM {self.DATASET}.{table_id}
         GROUP BY user_id, content_id
         ORDER BY user_id, content_id
@@ -786,7 +850,8 @@ class Queries:
         SELECT user_id, part,
             SUM(answered_correctly) ac_cumsum_part,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_part,
-            SUM(content_type_id) l_cumcnt_part
+            SUM(content_type_id) l_cumcnt_part,
+            IFNULL(CAST(AVG(pqet_current) AS INT64), -1) pqet_cumavg_part
         FROM {self.DATASET}.{table_id} t
         JOIN {self.DATASET}.content_tags c
         ON t.ql_id = c.ql_id
@@ -794,20 +859,24 @@ class Queries:
         ORDER BY user_id, part
         """, sys._getframe().f_code.co_name + '_'
     
-    def select_users_tag_final_state(self, table_id='train'):
+    def select_users_tag_final_state(self, table_id='tag_response'):
         return f"""
-        WITH tags_table AS (
-        SELECT ql_id, tags, tags_array,
-        FROM {self.DATASET}.content_tags
-        )
         SELECT user_id, tag, SUM(answered_correctly) ac_cumsum_tag,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_tag,
-            SUM(content_type_id) l_cumcnt_tag
-        FROM tags_table
-        JOIN UNNEST(tags_table.tags_array) AS tag
-        JOIN {self.DATASET}.{table_id} t
-        ON t.ql_id = tags_table.ql_id
+            SUM(content_type_id) l_cumcnt_tag,
+            IFNULL(CAST(AVG(pqet_current) AS INT64), -1) pqet_cumavg_tag
+        FROM {self.DATASET}.{table_id}
         GROUP BY user_id, tag
         ORDER BY user_id, tag
         """, sys._getframe().f_code.co_name + '_'
-
+    
+    def select_users_part_tag_final_state(self, table_id='tag_response'):
+        return f"""
+        SELECT user_id, part, tag, SUM(answered_correctly) ac_cumsum_part_tag,
+            SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_part_tag,
+            SUM(content_type_id) l_cumcnt_part_tag,
+            IFNULL(CAST(AVG(pqet_current) AS INT64), -1) pqet_cumavg_part_tag
+        FROM {self.DATASET}.{table_id}
+        GROUP BY user_id, part, tag
+        ORDER BY user_id, part, tag
+        """, sys._getframe().f_code.co_name + '_'
