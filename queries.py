@@ -603,6 +603,7 @@ class Queries:
     # ===========================
     # ===== TOP CONTENT_IDS =====
     # ===========================
+    
     def create_top_content_ids(self, top_content_ids, table_id='top_content_ids'):
         calc_list = [
             'IFNULL(SUM(CAST(answered_correctly = 1 AND content_id = {cid} AS INT64)) OVER (w), 0) ac_cumsum_top_cid_{cid}',
@@ -784,56 +785,6 @@ class Queries:
         ORDER BY user_id
         """, sys._getframe().f_code.co_name + '_'    
     
-#     # roll_stats - to start with going to take the last row
-#     # top_cids are already in the tags table - just need to pass the ids
-#     def select_user_final_state(self, table_id='train', no_upto=10):
-#         return f"""            
-
-#         SELECT t.user_id, ac_cumsum, ac_cumsum_upto,
-#             l_cumcnt, r_cumcnt, r_cumcnt_upto, session, timestamp,
-#             ac_cumsum_session, r_cumcnt_session,
-#             l_cumcnt_session
-#         FROM (
-#             SELECT user_id, SUM(answered_correctly) ac_cumsum,
-#                     SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt,
-#                     SUM(content_type_id) l_cumcnt,
-#                     MAX(session) session,
-#                     MAX(timestamp) timestamp
-#             FROM {self.DATASET}.{table_id}
-#             GROUP BY user_id
-#             ORDER BY user_id
-#         ) t
-#         JOIN (
-#             SELECT user_id, FIRST_VALUE(ac_cumsum_upto) OVER(w) ac_cumsum_upto,
-#                  FIRST_VALUE(r_cumcnt_upto) OVER(w) r_cumcnt_upto,
-#                  ROW_NUMBER() OVER (w) row_number
-#             FROM {self.DATASET}.train
-#             WHERE r_cumcnt_upto <= {no_upto}
-#             WINDOW
-#                 w AS (PARTITION BY user_id ORDER BY row_id DESC)
-#             ORDER BY user_id
-#         ) u ON t.user_id = u.user_id AND u.row_number = 1
-#         JOIN (
-#             SELECT
-#                 t2.user_id,
-#                 SUM(answered_correctly) ac_cumsum_session,
-#                 SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_session,
-#                 SUM(content_type_id) l_cumcnt_session
-#             FROM {self.DATASET}.{table_id} t2
-#             JOIN (
-#                 SELECT
-#                     user_id,
-#                     MAX(session) session
-#                 FROM {self.DATASET}.{table_id}
-#                 GROUP BY user_id
-#             ) calc
-#             ON t2.user_id = calc.user_id
-#                 AND t2.session = calc.session
-#             GROUP BY user_id
-#         ) s ON t.user_id = s.user_id
-#         ORDER BY user_id
-#         """, sys._getframe().f_code.co_name + '_'
-
     def select_users_content_final_state(self, table_id='train'):
         return f"""
         SELECT user_id, content_id,

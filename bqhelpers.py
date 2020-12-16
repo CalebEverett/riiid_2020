@@ -237,3 +237,23 @@ class BQHelper:
         df = self.get_df_files(file_paths, dtypes)
         
         return df
+    
+    def get_df_query_bqs(self, query, filename, from_bq=True, dtypes=None):
+        if from_bq:    
+            qj = self.bq_client.query(query)
+            df = qj.to_dataframe(create_bqstorage_client=True, progress_bar_type='tqdm_notebook')
+            try:
+                df = df.astype({c: dtypes.get(c, 'int32') for c in df.columns})       
+            except:
+                print('There was a problem with the dtypes.')
+                return df
+            print('Saving to pickle...')
+            df.to_pickle(filename)
+            print('Uploading to gcs...')
+            self.bucket.blob(filename).upload_from_filename(filename)
+            print('Done!')
+            return df
+        else:
+            if not Path(filename).exists():
+                self.bucket.blob(filename).download_to_filename(filename)
+            return pd.read_pickle(filename)
