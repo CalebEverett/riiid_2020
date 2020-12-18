@@ -1,4 +1,5 @@
 import sys
+import numpy as np
 
 class Queries:
     def __init__(self, DATASET):
@@ -106,7 +107,7 @@ class Queries:
     def update_ts_delta(self, table_id='train'):
         return f"""
             UPDATE {self.DATASET}.{table_id} t
-            SET t.ts_delta = IFNULL(timestamp - p.ts_prior, -1)
+            SET t.ts_delta = timestamp - p.ts_prior
             FROM (
                 SELECT
                 row_id, LAST_VALUE(timestamp) OVER (
@@ -149,48 +150,6 @@ class Queries:
             WHERE content_type_id = 1;
         """, sys._getframe().f_code.co_name + '_'
     
-    def update_train_window_containers_session(self, table_id='train', session_hours=18):
-        return f"""
-        UPDATE {self.DATASET}.{table_id} t
-        SET 
-            session = calc.session,
-            ac_cumsum_session = calc.ac_cumsum_session,
-            r_cumcnt_session = calc.r_cumcnt_session,
-            ac_cumsum_pct_session = IFNULL(CAST(SAFE_DIVIDE(calc.ac_cumsum_session * 100,
-                 calc.r_cumcnt_session) AS INT64), -1),
-            l_cumcnt_session = calc.l_cumcnt_session,
-            pqet_cumavg_session = CAST(calc.pqet_cumavg_session AS INT64)
-        FROM (
-            SELECT
-                row_id, session,
-                IFNULL(SUM(answered_correctly) OVER (f), 0) ac_cumsum_session,
-                IFNULL(SUM(CAST(content_type_id = 0 AS INT64)) OVER (f), 0) r_cumcnt_session,
-                IFNULL(SUM(content_type_id) OVER (i), 0) l_cumcnt_session,
-                IFNULL(AVG(pqet_current) OVER (f), 0) pqet_cumavg_session
-            FROM (
-                SELECT
-                    user_id, task_container_id, task_container_id_q, row_id,
-                    answered_correctly, content_type_id, pqet_current,
-                    IFNULL(SUM(session_flag) OVER (c), 0) session
-                FROM (
-                    SELECT
-                        user_id, task_container_id, task_container_id_q, row_id,
-                        timestamp, answered_correctly, content_type_id, pqet_current,
-                        IF(ts_delta > (1000 * 60 * 60 * {session_hours}), 1, 0) session_flag
-                    FROM {self.DATASET}.{table_id}
-                )
-                WINDOW
-                    c AS (PARTITION BY user_id ORDER BY task_container_id_q)
-            )
-            WINDOW
-                e AS (PARTITION BY user_id, session ORDER BY task_container_id_q),
-                f AS (e RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
-                h AS (PARTITION BY user_id, session ORDER BY task_container_id),
-                i AS (h RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
-        ) calc
-        WHERE calc.row_id = t.row_id
-        """, sys._getframe().f_code.co_name + '_'
-
     def update_train_window_containers(self, table_id='train'):
         return f"""
         UPDATE {self.DATASET}.{table_id} t
@@ -201,14 +160,18 @@ class Queries:
             ac_cumsum_pct = IFNULL(CAST(SAFE_DIVIDE(calc.ac_cumsum * 100,
                  calc.r_cumcnt) AS INT64), -1),
             l_cumcnt = calc.l_cumcnt,
-            pqet_cumavg = CAST(calc.pqet_cumavg AS INT64),
-            
+            pqet_cumsum = calc.pqet_cumsum,
+            pqet_cumavg = IFNULL(CAST(SAFE_DIVIDE(calc.pqet_cumsum,
+                 calc.r_cumcnt) AS INT64), -1),
+                        
             -- content_id
             ac_cumsum_content_id = calc.ac_cumsum_content_id,
             r_cumcnt_content_id = calc.r_cumcnt_content_id,
             ac_cumsum_pct_content_id = IFNULL(CAST(SAFE_DIVIDE(calc.ac_cumsum_content_id * 100,
                 calc.r_cumcnt_content_id)AS INT64), -1),
-            pqet_cumavg_content_id = CAST(calc.pqet_cumavg_content_id AS INT64),
+            pqet_cumsum_content_id = calc.pqet_cumsum_content_id,
+            pqet_cumavg_content_id = IFNULL(CAST(SAFE_DIVIDE(calc.pqet_cumsum_content_id,
+                 calc.r_cumcnt_content_id) AS INT64), -1),
             
             -- part
             ac_cumsum_part = calc.ac_cumsum_part,
@@ -216,7 +179,9 @@ class Queries:
             ac_cumsum_pct_part = IFNULL(CAST(SAFE_DIVIDE(calc.ac_cumsum_part * 100,
                  calc.r_cumcnt_part) AS INT64), -1),
             l_cumcnt_part = calc.l_cumcnt_part,
-            pqet_cumavg_part = CAST(calc.pqet_cumavg_part AS INT64),
+            pqet_cumsum_part = calc.pqet_cumsum_part,
+            pqet_cumavg_part = IFNULL(CAST(SAFE_DIVIDE(calc.pqet_cumsum_part,
+                 calc.r_cumcnt_part) AS INT64), -1),
             
             -- clipped rows
             r_cumcnt_clip = IF(calc.r_cumcnt > 300, 300, calc.r_cumcnt)
@@ -228,18 +193,18 @@ class Queries:
                 IFNULL(SUM(answered_correctly) OVER (b), 0) ac_cumsum,
                 IFNULL(SUM(CAST(content_type_id = 0 AS INT64)) OVER (b), 0) r_cumcnt,
                 IFNULL(SUM(content_type_id) OVER (b), 0) l_cumcnt,
-                IFNULL(AVG(pqet_current) OVER (b), 0) pqet_cumavg,
+                IFNULL(SUM(pqet_current) OVER (b), 0) pqet_cumsum,
                 
                 -- content_id
                 IFNULL(SUM(answered_correctly) OVER (e), 0) ac_cumsum_content_id,
                 IFNULL(SUM(CAST(content_type_id = 0 AS INT64)) OVER (e), 0) r_cumcnt_content_id,
-                IFNULL(AVG(pqet_current) OVER (e), 0) pqet_cumavg_content_id,
+                IFNULL(SUM(pqet_current) OVER (e), 0) pqet_cumsum_content_id,
                 
                 -- part
                 IFNULL(SUM(answered_correctly) OVER (g), 0) ac_cumsum_part,
                 IFNULL(SUM(CAST(content_type_id = 0 AS INT64)) OVER (g), 0) r_cumcnt_part,
                 IFNULL(SUM(content_type_id) OVER (g), 0) l_cumcnt_part,
-                IFNULL(AVG(pqet_current) OVER (g), 0) pqet_cumavg_part
+                IFNULL(SUM(pqet_current) OVER (g), 0) pqet_cumsum_part
             FROM {self.DATASET}.{table_id} t2
             LEFT JOIN {self.DATASET}.content_tags c
                 ON t2.ql_id = c.ql_id
@@ -265,8 +230,9 @@ class Queries:
           ac_cumsum_pct_tags = IFNULL(CAST(SAFE_DIVIDE(calc.ac_cumsum_tags * 100,
               calc.r_cumcnt_tags) AS INT64), -1),
           l_cumcnt_tags = calc.l_cumcnt_tags,
-          pqet_cumavg_tags = IFNULL(CAST(SAFE_DIVIDE(calc.pqet_current_cumsum_tags,
-            calc.r_cumcnt_tags) AS INT64), -1),
+          pqet_cumsum_tags = calc.pqet_cumsum_tags,
+          pqet_cumavg_tags = IFNULL(CAST(SAFE_DIVIDE(calc.pqet_cumsum_tags,
+               calc.r_cumcnt_tags) AS INT64), -1),
 
           --part_tags
           ac_cumsum_part_tags = calc.ac_cumsum_part_tags,
@@ -274,8 +240,9 @@ class Queries:
           ac_cumsum_pct_part_tags = IFNULL(CAST(SAFE_DIVIDE(calc.ac_cumsum_part_tags * 100,
               calc.r_cumcnt_part_tags) AS INT64), -1),
           l_cumcnt_part_tags = calc.l_cumcnt_part_tags,
-          pqet_cumavg_part_tags = IFNULL(CAST(SAFE_DIVIDE(calc.pqet_current_cumsum_part_tags,
-            calc.r_cumcnt_part_tags) AS INT64), -1)
+          pqet_cumsum_part_tags = calc.pqet_cumsum_part_tags,
+          pqet_cumavg_part_tags = IFNULL(CAST(SAFE_DIVIDE(calc.pqet_cumsum_part_tags,
+               calc.r_cumcnt_part_tags) AS INT64), -1)
         
         FROM ( 
           SELECT
@@ -284,13 +251,13 @@ class Queries:
             IFNULL(SUM(ac_cumcum_tags), 0) ac_cumsum_tags,
             IFNULL(SUM(r_cumcnt_tags), 0) r_cumcnt_tags,
             IFNULL(SUM(l_cumcnt_tags), 0) l_cumcnt_tags,
-            IFNULL(SUM(pqet_current_cumsum_tags), 0) pqet_current_cumsum_tags,
+            IFNULL(SUM(pqet_cumsum_tags), 0) pqet_cumsum_tags,
 
             --part-tags
             IFNULL(SUM(ac_cumcum_part_tags), 0) ac_cumsum_part_tags,
             IFNULL(SUM(r_cumcnt_part_tags), 0) r_cumcnt_part_tags,
             IFNULL(SUM(l_cumcnt_part_tags), 0) l_cumcnt_part_tags,
-            IFNULL(SUM(pqet_current_cumsum_part_tags), 0) pqet_current_cumsum_part_tags,
+            IFNULL(SUM(pqet_cumsum_part_tags), 0) pqet_cumsum_part_tags
 
           FROM (
           SELECT
@@ -299,13 +266,13 @@ class Queries:
             SUM(answered_correctly) OVER(b) ac_cumcum_tags,
             SUM(CAST(content_type_id = 0 AS INT64)) OVER(b) r_cumcnt_tags,
             SUM(content_type_id) OVER(b) l_cumcnt_tags,
-            SUM(pqet_current) OVER(b) pqet_current_cumsum_tags,
+            SUM(pqet_current) OVER(b) pqet_cumsum_tags,
 
             --part-tags
             SUM(answered_correctly) OVER(d) ac_cumcum_part_tags,
             SUM(CAST(content_type_id = 0 AS INT64)) OVER(d) r_cumcnt_part_tags,
             SUM(content_type_id) OVER(d) l_cumcnt_part_tags,
-            SUM(pqet_current) OVER(d) pqet_current_cumsum_part_tags
+            SUM(pqet_current) OVER(d) pqet_cumsum_part_tags
 
           FROM data.tag_response
           WINDOW
@@ -320,7 +287,51 @@ class Queries:
         WHERE u.row_id = calc.row_id
         """, sys._getframe().f_code.co_name + '_'    
     
-    def update_answered_correctly_cumsum_upto(self, table_id='train', no_upto=10):        
+    def update_train_window_containers_session(self, table_id='train', session_hours=18):
+        return f"""
+        UPDATE {self.DATASET}.{table_id} t
+        SET 
+            session = calc.session,
+            ac_cumsum_session = calc.ac_cumsum_session,
+            r_cumcnt_session = calc.r_cumcnt_session,
+            ac_cumsum_pct_session = IFNULL(CAST(SAFE_DIVIDE(calc.ac_cumsum_session * 100,
+                 calc.r_cumcnt_session) AS INT64), -1),
+            l_cumcnt_session = calc.l_cumcnt_session,
+            pqet_cumsum_session = calc.pqet_cumsum_session,
+            pqet_cumavg_session = IFNULL(CAST(SAFE_DIVIDE(calc.pqet_cumsum_session,
+                 calc.r_cumcnt_session) AS INT64), -1)
+        FROM (
+            SELECT
+                row_id, session,
+                IFNULL(SUM(answered_correctly) OVER (f), 0) ac_cumsum_session,
+                IFNULL(SUM(CAST(content_type_id = 0 AS INT64)) OVER (f), 0) r_cumcnt_session,
+                IFNULL(SUM(content_type_id) OVER (i), 0) l_cumcnt_session,
+                IFNULL(SUM(pqet_current) OVER (f), 0) pqet_cumsum_session
+            FROM (
+                SELECT
+                    user_id, task_container_id, task_container_id_q, row_id,
+                    answered_correctly, content_type_id, pqet_current,
+                    IFNULL(SUM(session_flag) OVER (c), 0) session
+                FROM (
+                    SELECT
+                        user_id, task_container_id, task_container_id_q, row_id,
+                        timestamp, answered_correctly, content_type_id, pqet_current,
+                        IF(ts_delta > (1000 * 60 * 60 * {session_hours}), 1, 0) session_flag
+                    FROM {self.DATASET}.{table_id}
+                )
+                WINDOW
+                    c AS (PARTITION BY user_id ORDER BY task_container_id_q)
+            )
+            WINDOW
+                e AS (PARTITION BY user_id, session ORDER BY task_container_id_q),
+                f AS (e RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                h AS (PARTITION BY user_id, session ORDER BY task_container_id),
+                i AS (h RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        ) calc
+        WHERE calc.row_id = t.row_id
+        """, sys._getframe().f_code.co_name + '_'
+
+    def update_train_window_containers_upto(self, table_id='train', no_upto=10):        
         return f"""            
         UPDATE {self.DATASET}.{table_id} t
         SET ac_cumsum_upto = IF(r_cumcnt <= {no_upto}, ac_cumsum, m.ac_max),
@@ -330,11 +341,14 @@ class Queries:
                     IF(r_cumcnt <= {no_upto}, ac_cumsum, m.ac_max) * 100,
                     IF(r_cumcnt <= {no_upto}, r_cumcnt, m.rc_max)
                 ) AS INT64), -1),
+           pqet_cumsum_upto = CAST(IF(r_cumcnt <= {no_upto},
+               pqet_cumsum, m.pqet_cumsum_upto) AS INT64),
            pqet_cumavg_upto = CAST(IF(r_cumcnt <= {no_upto},
                pqet_cumavg, m.pqet_cumavg_upto) AS INT64)
         FROM (
             SELECT user_id, MAX(ac_cumsum) ac_max,
                 MAX(r_cumcnt) rc_max,
+                SUM(pqet_current) pqet_cumsum_upto,
                 AVG(pqet_current) pqet_cumavg_upto
             FROM {self.DATASET}.{table_id}
             WHERE r_cumcnt <= {no_upto}
@@ -361,31 +375,6 @@ class Queries:
           ORDER BY user_id, task_container_id, row_id, part, tag
         )
         """, sys._getframe().f_code.co_name + '_'
-    
-    def update_top_cids(self, top_content_ids):
-        def get_top_c_q(it):
-            i, t = it
-            return (f'ac_cumsum_pct_top_cid_{i} = CAST(IFNULL(SAFE_DIVIDE(ac_cumsum_top_cid_{i} * 100, r_cumcnt_top_cid_{i}), -1) AS INT64)',
-                    f'SUM(CAST(answered_correctly = 1 AND content_id = {t} AS INT64)) OVER (w) ac_cumsum_top_cid_{i},'
-                    f'SUM(CAST(content_id = {t} AS INT64)) OVER (w) r_cumcnt_top_cid_{i}')
-
-        sets, calcs = list(map(list, zip(*map(get_top_c_q, enumerate(top_content_ids)))))
-
-        return f"""
-        UPDATE {self.DATASET}.train t
-        SET
-          {(',').join(sets)}
-        FROM (
-          SELECT
-            row_id,
-            {(',').join(calcs)}
-          FROM {self.DATASET}.train
-          WINDOW
-            w AS (PARTITION BY user_id ORDER BY task_container_id
-            RANGE BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
-        ) calc
-        WHERE t.row_id = calc.row_id
-        """, sys._getframe().f_code.co_name + '_'      
     
     def update_train_window_rows(self, table_id='train', window=10):
         """Calculates aggregate over window number of rows with task_container_id
@@ -599,7 +588,83 @@ class Queries:
         WHERE row_id = row_id_r;
         """, sys._getframe().f_code.co_name + '_'
            
+        
+    # =======================================
+    # ===== EXPONENTIAL MOVING AVERAGES =====
+    # =======================================
 
+    def create_ewma_stats(self, table_id='ewma_stats'):
+        return f"""
+        CREATE OR REPLACE TABLE {self.DATASET}.{table_id} AS (
+          SELECT 
+              row_id row_id_e, user_id user_id_e,
+              task_container_id task_container_id_e,
+              task_container_id_q task_container_id_q_e
+          FROM {self.DATASET}.train
+        );
+        """, sys._getframe().f_code.co_name + '_'
+    
+    def update_ewma_stats(self, alphas, n_weights, column_calc, prefix,
+                            offset=0, tid='task_container_id', table_id='ewma_stats'):
+
+        def get_ewma_calc_string(alpha, prefix=None):
+            return (f'CAST(IF({tid} < {int(100/alpha)}, -1, '
+                    f'SUM(weight * prior_val * CAST(alpha = {alpha} AS INT64)) * {alpha / 100}) AS INT64) {prefix}_{alpha:02d}')
+
+#         def get_alpha_string(alpha):
+#             ewma_weights = np.power(np.repeat((1-alpha/100), n_ewma_weights), np.arange(n_ewma_weights, dtype='float'))
+#             ewma_weights_string = (',').join(map(lambda w: f'{w:0.6f}' , ewma_weights)) 
+#             return f'SELECT *, {alpha} alpha FROM UNNEST([{ewma_weights_string}]) weight WITH OFFSET offset'
+
+        def get_alpha_string(alpha):
+            return f'SELECT offset, {alpha} alpha, POWER({1-alpha/100}, offset) weight FROM UNNEST(GENERATE_ARRAY(0,{n_weights})) offset'
+        
+        create_list = [f'{prefix}_{a:02d} INT64' for a in alphas]
+        col_list = [c.split()[0] for c in create_list]
+        set_list = [f'{c} = calc.{c}' for c in col_list]
+        calcs_string = (',').join([get_ewma_calc_string(alpha, prefix=prefix) for alpha in alphas])
+        union_strings = ('\n').join([f'UNION ALL {get_alpha_string(a)}' for a in alphas[1:]])
+        weights_string = f"""{get_alpha_string(alphas[0])}
+                             {union_strings}"""
+
+        return f"""
+        ALTER TABLE {self.DATASET}.{table_id}
+            {(',').join([f'ADD COLUMN {c}' for c in create_list])};
+            
+        UPDATE {self.DATASET}.{table_id} e
+        SET
+            {(',').join(set_list)}
+        FROM (
+            SELECT user_id, {tid}, --MAX(current_val) current_val,
+              {calcs_string}
+            FROM (
+            WITH weights AS (
+                {weights_string}
+            )
+            SELECT t.user_id, t.{tid},
+              t.{tid} - t2.{tid} tid_delta, current_val, prior_val, alpha, weight
+            FROM (
+              SELECT user_id, {tid}, {column_calc} current_val
+              FROM {self.DATASET}.train
+              GROUP BY user_id, {tid}
+            ) t
+            LEFT JOIN (
+              SELECT user_id, {tid}, {column_calc} prior_val
+              FROM {self.DATASET}.train
+              GROUP BY user_id, {tid}
+            ) t2
+            ON t.user_id = t2.user_id
+              AND t2.{tid} <= t.{tid} + {offset}
+              AND t2.{tid} > t.{tid} - {n_weights}
+            JOIN weights w
+            ON (t.{tid} - t2.{tid}) = w.offset - {offset}
+            )
+            GROUP BY user_id, {tid}
+        ) calc
+        WHERE e.user_id_e = calc.user_id AND e.{tid}_e = calc.{tid}
+        """, sys._getframe().f_code.co_name + '_' + prefix + '_'   
+
+    
     # ===========================
     # ===== TOP CONTENT_IDS =====
     # ===========================
@@ -724,8 +789,8 @@ class Queries:
             FROM {self.DATASET}.{table_id} t
             LEFT JOIN {self.DATASET}.content_tags ct
             ON t.ql_id = ct.ql_id
-            LEFT JOIN {self.DATASET}.roll_stats r
-            ON t.row_id = r.row_id_r
+            LEFT JOIN {self.DATASET}.ewma_stats e
+            ON t.row_id = e.row_id_e
             LEFT JOIN {self.DATASET}.top_content_ids tc
             ON t.row_id = tc.row_id_tc
             WHERE ({folds}{null_fold}){excl_lectures}            
@@ -755,7 +820,7 @@ class Queries:
     
     def create_train_sample(self, table_id='train_sample', user_id_max=50000):
         return f"""
-            CREATE TABLE {self.DATASET}.{table_id} AS
+            CREATE OR REPLACE TABLE {self.DATASET}.{table_id} AS
             SELECT *
             FROM {self.DATASET}.train
             WHERE user_id <= {user_id_max}
@@ -790,7 +855,7 @@ class Queries:
         SELECT user_id, content_id,
             SUM(answered_correctly) ac_cumsum_content_id,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_content_id,
-            IFNULL(CAST(AVG(pqet_current) AS INT64), -1) pqet_cumavg_content_id
+            SUM(pqet_current) pqet_cumsum_content_id
         FROM {self.DATASET}.{table_id}
         GROUP BY user_id, content_id
         ORDER BY user_id, content_id
@@ -802,7 +867,7 @@ class Queries:
             SUM(answered_correctly) ac_cumsum_part,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_part,
             SUM(content_type_id) l_cumcnt_part,
-            IFNULL(CAST(AVG(pqet_current) AS INT64), -1) pqet_cumavg_part
+            SUM(pqet_current) pqet_cumsum_part
         FROM {self.DATASET}.{table_id} t
         JOIN {self.DATASET}.content_tags c
         ON t.ql_id = c.ql_id
@@ -815,7 +880,7 @@ class Queries:
         SELECT user_id, tag, SUM(answered_correctly) ac_cumsum_tag,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_tag,
             SUM(content_type_id) l_cumcnt_tag,
-            IFNULL(CAST(AVG(pqet_current) AS INT64), -1) pqet_cumavg_tag
+            SUM(pqet_current) pqet_cumsum_tag
         FROM {self.DATASET}.{table_id}
         GROUP BY user_id, tag
         ORDER BY user_id, tag
@@ -826,7 +891,7 @@ class Queries:
         SELECT user_id, part, tag, SUM(answered_correctly) ac_cumsum_part_tag,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_part_tag,
             SUM(content_type_id) l_cumcnt_part_tag,
-            IFNULL(CAST(AVG(pqet_current) AS INT64), -1) pqet_cumavg_part_tag
+            SUM(pqet_current) pqet_cumsum_part_tag
         FROM {self.DATASET}.{table_id}
         GROUP BY user_id, part, tag
         ORDER BY user_id, part, tag

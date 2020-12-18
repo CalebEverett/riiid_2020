@@ -238,22 +238,28 @@ class BQHelper:
         
         return df
     
-    def get_df_query_bqs(self, query, filename, from_bq=True, dtypes=None):
+    def get_df_query_bqs(self, query, filename=None, from_bq=True, dtypes=None, save=True, fillna=None):
         if from_bq:    
             qj = self.bq_client.query(query)
             df = qj.to_dataframe(create_bqstorage_client=True, progress_bar_type='tqdm_notebook')
+            if fillna is not None:
+                df = df.fillna(fillna)
             try:
                 df = df.astype({c: dtypes.get(c, 'int32') for c in df.columns})       
             except:
                 print('There was a problem with the dtypes.')
                 return df
-            print('Saving to pickle...')
-            df.to_pickle(filename)
-            print('Uploading to gcs...')
-            self.bucket.blob(filename).upload_from_filename(filename)
-            print('Done!')
+            if save:
+                print('Saving to pickle...')
+                df.to_pickle(filename)
+                print('Uploading to gcs...')
+                self.bucket.blob(filename).upload_from_filename(filename)
+                print('Done!')
             return df
         else:
-            if not Path(filename).exists():
-                self.bucket.blob(filename).download_to_filename(filename)
-            return pd.read_pickle(filename)
+            try:
+                if not Path(filename).exists():
+                    self.bucket.blob(filename).download_to_filename(filename)
+                return pd.read_pickle(filename)
+            except:
+                print('File does not exist locally or in gcs.')
