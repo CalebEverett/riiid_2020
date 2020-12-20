@@ -100,7 +100,11 @@ class Queries:
                 FROM {self.DATASET}.train            
                 WHERE content_type_id = 0
             ) p
-            WHERE t.row_id = p.row_id
+            WHERE t.row_id = p.row_id;
+            
+            UPDATE {self.DATASET}.{table_id}
+            SET pqet_current = 0
+            WHERE content_type_id = 1;
             
         """, sys._getframe().f_code.co_name + '_'
     
@@ -116,7 +120,11 @@ class Queries:
                 FROM {self.DATASET}.train            
                 WHERE content_type_id = 0
             ) p
-            WHERE t.row_id = p.row_id
+            WHERE t.row_id = p.row_id;
+            
+            UPDATE {self.DATASET}.{table_id}
+            SET ts_delta = 0
+            WHERE content_type_id = 1;
         """, sys._getframe().f_code.co_name + '_'
 
     def update_task_container_id(self, table_id='train',
@@ -220,6 +228,25 @@ class Queries:
         WHERE calc.row_id = t.row_id
         """, sys._getframe().f_code.co_name + '_'
 
+    def create_tag_response(self):
+        return f"""
+        CREATE OR REPLACE TABLE {self.DATASET}.tag_response AS (
+          WITH tags_table AS (
+              SELECT ql_id, question_id, part, tags_array,
+              FROM {self.DATASET}.content_tags
+          )
+          SELECT user_id, t.row_id, task_container_id, task_container_id_q,
+              t.ql_id, content_type_id, part, tag, answered_correctly, pqet_current
+          FROM tags_table
+          CROSS JOIN UNNEST(tags_table.tags_array) AS tag
+          JOIN {self.DATASET}.train t
+          ON
+            t.content_type_id = 0
+            AND tags_table.ql_id = t.ql_id
+          ORDER BY user_id, task_container_id, row_id, part, tag
+        )
+        """, sys._getframe().f_code.co_name + '_'
+    
     def update_train_window_containers_tags(self, table_id='train'):
         return f"""
         UPDATE data.train u
@@ -248,13 +275,13 @@ class Queries:
           SELECT
             row_id,
             --tags
-            IFNULL(SUM(ac_cumcum_tags), 0) ac_cumsum_tags,
+            IFNULL(SUM(ac_cumsum_tags), 0) ac_cumsum_tags,
             IFNULL(SUM(r_cumcnt_tags), 0) r_cumcnt_tags,
             IFNULL(SUM(l_cumcnt_tags), 0) l_cumcnt_tags,
             IFNULL(SUM(pqet_cumsum_tags), 0) pqet_cumsum_tags,
 
             --part-tags
-            IFNULL(SUM(ac_cumcum_part_tags), 0) ac_cumsum_part_tags,
+            IFNULL(SUM(ac_cumsum_part_tags), 0) ac_cumsum_part_tags,
             IFNULL(SUM(r_cumcnt_part_tags), 0) r_cumcnt_part_tags,
             IFNULL(SUM(l_cumcnt_part_tags), 0) l_cumcnt_part_tags,
             IFNULL(SUM(pqet_cumsum_part_tags), 0) pqet_cumsum_part_tags
@@ -263,13 +290,13 @@ class Queries:
           SELECT
             row_id,
             --tags
-            SUM(answered_correctly) OVER(b) ac_cumcum_tags,
+            SUM(answered_correctly) OVER(b) ac_cumsum_tags,
             SUM(CAST(content_type_id = 0 AS INT64)) OVER(b) r_cumcnt_tags,
             SUM(content_type_id) OVER(b) l_cumcnt_tags,
             SUM(pqet_current) OVER(b) pqet_cumsum_tags,
 
             --part-tags
-            SUM(answered_correctly) OVER(d) ac_cumcum_part_tags,
+            SUM(answered_correctly) OVER(d) ac_cumsum_part_tags,
             SUM(CAST(content_type_id = 0 AS INT64)) OVER(d) r_cumcnt_part_tags,
             SUM(content_type_id) OVER(d) l_cumcnt_part_tags,
             SUM(pqet_current) OVER(d) pqet_cumsum_part_tags
@@ -355,25 +382,6 @@ class Queries:
             GROUP BY user_id
         ) m
         WHERE t.user_id = m.user_id
-        """, sys._getframe().f_code.co_name + '_'
-    
-    def create_tag_response(self):
-        return f"""
-        CREATE OR REPLACE TABLE {self.DATASET}.tag_response AS (
-          WITH tags_table AS (
-              SELECT ql_id, question_id, part, tags_array,
-              FROM {self.DATASET}.content_tags
-          )
-          SELECT user_id, t.row_id, task_container_id, task_container_id_q,
-              t.ql_id, content_type_id, part, tag, answered_correctly, pqet_current
-          FROM tags_table
-          CROSS JOIN UNNEST(tags_table.tags_array) AS tag
-          JOIN {self.DATASET}.train t
-          ON
-            t.content_type_id = 0
-            AND tags_table.ql_id = t.ql_id
-          ORDER BY user_id, task_container_id, row_id, part, tag
-        )
         """, sys._getframe().f_code.co_name + '_'
     
     def update_train_window_rows(self, table_id='train', window=10):
@@ -605,11 +613,11 @@ class Queries:
         """, sys._getframe().f_code.co_name + '_'
     
     def update_ewma_stats(self, alphas, n_weights, column_calc, prefix,
-                            offset=0, tid='task_container_id', table_id='ewma_stats'):
+                          offset=0, tid='task_container_id', table_id='ewma_stats',
+                          add_columns=True):
 
         def get_ewma_calc_string(alpha, prefix=None):
-            return (f'CAST(IF({tid} < {int(100/alpha)}, -1, '
-                    f'SUM(weight * prior_val * CAST(alpha = {alpha} AS INT64)) * {alpha / 100}) AS INT64) {prefix}_{alpha:02d}')
+            return (f'CAST(SUM(weight * prior_val * CAST(alpha = {alpha} AS INT64)) * {alpha / 100} AS INT64) {prefix}_{alpha:02d}')
 
 #         def get_alpha_string(alpha):
 #             ewma_weights = np.power(np.repeat((1-alpha/100), n_ewma_weights), np.arange(n_ewma_weights, dtype='float'))
@@ -627,10 +635,14 @@ class Queries:
         weights_string = f"""{get_alpha_string(alphas[0])}
                              {union_strings}"""
 
+        add_columns_string = f"""
+                                ALTER TABLE {self.DATASET}.{table_id}
+                                    {(',').join([f'ADD COLUMN {c}' for c in create_list])};
+                             """ if add_columns else ''
+        
         return f"""
-        ALTER TABLE {self.DATASET}.{table_id}
-            {(',').join([f'ADD COLUMN {c}' for c in create_list])};
-            
+        {add_columns_string}
+
         UPDATE {self.DATASET}.{table_id} e
         SET
             {(',').join(set_list)}
@@ -832,43 +844,85 @@ class Queries:
     # ===== STATE TABLES =====
     # ========================
     
-    def select_user_final_state(self, columns=None):
+    def select_user_final_state(self, no_upto=10):
         return f"""
-        WITH sorted_records AS (
-          SELECT *, ROW_NUMBER() OVER (w) row_num
-          FROM {self.DATASET}.train t
-          JOIN {self.DATASET}.roll_stats r
-          ON t.row_id = r.row_id_r
-          JOIN {self.DATASET}.top_content_ids tc
-          ON t.row_id = tc.row_id_tc 
-          WINDOW
-            w AS (PARTITION BY user_id ORDER BY row_id DESC)
+        WITH final_users AS (
+            SELECT user_id,
+                MAX(row_id) row_id,
+                MAX(task_container_id) task_container_id,
+                MAX(timestamp) timestamp,
+                MAX(session) session,
+                SUM(answered_correctly) ac_cumsum,
+                SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt,
+                SUM(content_type_id) l_cumcnt,
+                SUM(pqet_current) pqet_cumsum,
+                MAX(r_cumcnt_clip) r_cumcnt_clip
+            FROM {self.DATASET}.train
+            GROUP BY user_id
         )
-        SELECT {(', ').join(columns)}
-        FROM sorted_records
-        WHERE row_num = 1
-        ORDER BY user_id
+        SELECT final_users.*,
+            ts_delta,
+            ac_cumsum_upto,
+            r_cumcnt_upto,
+            l_cumcnt_upto,
+            pqet_cumsum_upto,
+            ac_cumsum_session,
+            r_cumcnt_session,
+            l_cumcnt_session,
+            pqet_cumsum_session,
+        FROM final_users
+        JOIN (
+            SELECT user_id, row_id, ts_delta
+            FROM {self.DATASET}.train
+        ) t ON final_users.user_id = t.user_id
+            AND final_users.row_id = t.row_id
+        JOIN (
+            SELECT
+                user_id,
+                SUM(answered_correctly) ac_cumsum_upto,
+                SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_upto,
+                SUM(content_type_id) l_cumcnt_upto,
+                SUM(pqet_current) pqet_cumsum_upto
+            FROM {self.DATASET}.train
+            WHERE r_cumcnt <= {no_upto}
+            GROUP BY user_id
+        ) u ON final_users.user_id = u.user_id 
+        JOIN (
+            SELECT
+                user_id,
+                session,
+                SUM(answered_correctly) ac_cumsum_session,
+                SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_session,
+                SUM(content_type_id) l_cumcnt_session,
+                SUM(pqet_current) pqet_cumsum_session
+            FROM {self.DATASET}.train
+            GROUP BY user_id, session
+        ) s ON final_users.user_id = s.user_id
+            AND final_users.session = s.session
         """, sys._getframe().f_code.co_name + '_'    
     
     def select_users_content_final_state(self, table_id='train'):
-        return f"""
-        SELECT user_id, content_id,
+        return f"""    
+        SELECT
+            user_id, content_id,
             SUM(answered_correctly) ac_cumsum_content_id,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_content_id,
+            SUM(content_type_id) l_cumcnt_content_id,
             SUM(pqet_current) pqet_cumsum_content_id
-        FROM {self.DATASET}.{table_id}
+        FROM {self.DATASET}.train
         GROUP BY user_id, content_id
         ORDER BY user_id, content_id
         """, sys._getframe().f_code.co_name + '_'
     
     def select_users_part_final_state(self, table_id='train'):
         return f"""
-        SELECT user_id, part,
+        SELECT
+            user_id, part,
             SUM(answered_correctly) ac_cumsum_part,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_part,
             SUM(content_type_id) l_cumcnt_part,
             SUM(pqet_current) pqet_cumsum_part
-        FROM {self.DATASET}.{table_id} t
+        FROM {self.DATASET}.train t
         JOIN {self.DATASET}.content_tags c
         ON t.ql_id = c.ql_id
         GROUP BY user_id, part
@@ -877,7 +931,9 @@ class Queries:
     
     def select_users_tag_final_state(self, table_id='tag_response'):
         return f"""
-        SELECT user_id, tag, SUM(answered_correctly) ac_cumsum_tag,
+        SELECT
+            user_id, tag,
+            SUM(answered_correctly) ac_cumsum_tag,
             SUM(CAST(content_type_id = 0 AS INT64)) r_cumcnt_tag,
             SUM(content_type_id) l_cumcnt_tag,
             SUM(pqet_current) pqet_cumsum_tag
