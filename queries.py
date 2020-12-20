@@ -803,6 +803,8 @@ class Queries:
             ON t.ql_id = ct.ql_id
             LEFT JOIN {self.DATASET}.ewma_stats e
             ON t.row_id = e.row_id_e
+            LEFT JOIN {self.DATASET}.roll_stats r
+            ON t.row_id = r.row_id_r
             LEFT JOIN {self.DATASET}.top_content_ids tc
             ON t.row_id = tc.row_id_tc
             WHERE ({folds}{null_fold}){excl_lectures}            
