@@ -129,10 +129,17 @@ class Queries:
 
     def update_task_container_id(self, table_id='train',
                                    column_id='task_container_id',
-                                   excl_lectures=False):
+                                   excl_lectures=False, save_column=None):
         excl_lec = 'WHERE content_type_id = 0' if excl_lectures else ''
         
+        save_col = f"""
+            UPDATE {self.DATASET}.{table_id}
+            SET {save_column} = task_container_id
+            WHERE true;
+        """ if save_column is not None else ''
+        
         return f"""
+            {save_col}
             UPDATE {self.DATASET}.{table_id} t
             SET {column_id} = target.calc
             FROM (
@@ -531,51 +538,62 @@ class Queries:
     # ===== ROLL STATS =====
     # ======================    
     
-    def create_roll_stats(self, win_lens, calc_list, n_prec=0, table_id='roll_stats'):
-        wins = list(zip(win_lens, 'abcdefghij'))
-
-        col_list = [c.split()[-1] for c in calc_list]
-        col_list = [c.format(win_len=win_len) for c in col_list for win_len, _ in wins]
-        create_list = [f'{c} INT64' for c in col_list]
-
-        calc_list = [c.format(win_len=win_len, win_label=win_label)
-                     for c in calc_list for win_len, win_label in wins]
-
-        window_list = [f'{win_label} AS (w RANGE BETWEEN {win_len} PRECEDING AND {n_prec} PRECEDING)' for win_len, win_label in wins]
-
+    def create_roll_stats(self, table_id='roll_stats'):
         return f"""
-        DROP TABLE IF EXISTS {self.DATASET}.{table_id};
-
-        CREATE TABLE {self.DATASET}.{table_id} (
-            row_id_r INT64,
-            {(',').join(create_list)}
+        CREATE OR REPLACE TABLE {self.DATASET}.{table_id} AS (
+          SELECT row_id row_id_r
+          FROM {self.DATASET}.train
+          WHERE content_type_id = 0
         );
-
-        INSERT INTO {self.DATASET}.{table_id}
-            (row_id_r, {(',').join(col_list)})
-        SELECT
-            row_id,
-            {(',').join(calc_list)}
-        FROM {self.DATASET}.train
-        WHERE task_container_id_q IS NOT NULL
-        WINDOW
-            w AS (PARTITION BY user_id ORDER BY task_container_id_q),
-            {(',').join(window_list)}
-        """, sys._getframe().f_code.co_name + '_'  
+        """, sys._getframe().f_code.co_name + '_'
+     
     
-    def update_roll_stats(self, win_lens, calc_list, n_prec=0,
-                          table_id='roll_stats', tid_col='task_container_id'):
-        wins = list(zip(win_lens, 'abcdefghij'))
+#     def create_roll_stats(self, win_lens, calc_list, n_prec=0, table_id='roll_stats'):
+#         wins = list(zip(win_lens, 'abcdefghij'))
+
+#         col_list = [c.split()[-1] for c in calc_list]
+#         col_list = [c.format(win_len=win_len) for c in col_list for win_len, _ in wins]
+#         create_list = [f'{c} INT64' for c in col_list]
+
+#         calc_list = [c.format(win_len=win_len*60000, win_label=win_label)
+#                      for c in calc_list for win_len, win_label in wins]
+
+#         window_list = [f'{win_label} AS (w RANGE BETWEEN {win_len * 60000} PRECEDING AND timestamp - {n_prec} PRECEDING)' for win_len, win_label in wins]
+
+#         return f"""
+#         DROP TABLE IF EXISTS {self.DATASET}.{table_id};
+
+#         CREATE TABLE {self.DATASET}.{table_id} (
+#             row_id_r INT64,
+#             {(',').join(create_list)}
+#         );
+
+#         INSERT INTO {self.DATASET}.{table_id}
+#             (row_id_r, {(',').join(col_list)})
+#         SELECT
+#             row_id,
+#             {(',').join(calc_list)}
+#         FROM {self.DATASET}.train
+#         WHERE content_type_id = 0
+#         WINDOW
+#             w AS (PARTITION BY user_id ORDER BY timestamp),
+#             {(',').join(window_list)}
+#         """, sys._getframe().f_code.co_name + '_'  
+    
+    def update_roll_stats(self, win_minutes, calc_list, n_prec=0, table_id='roll_stats', excl_l=True):
+        wins = list(zip(win_minutes, 'abcdefghij'))
 
         col_list = [c.split()[-1] for c in calc_list]
-        col_list = [c.format(win_len=win_len) for c in col_list for win_len, _ in wins]
+        col_list = [c.format(win_minute=win_minute) for c in col_list for win_minute, _ in wins]
         create_list = [f'ADD COLUMN {c} INT64' for c in col_list]
         set_list = [f'{c} = calc.{c}' for c in col_list]
 
-        calc_list = [c.format(win_len=win_len, win_label=win_label)
-                     for c in calc_list for win_len, win_label in wins]
+        calc_list = [c.format(win_ms=win_minute*60000, win_minute=win_minute, win_label=win_label)
+                     for c in calc_list for win_minute, win_label in wins]
+        
+        excl_l_string = 'WHERE content_type_id = 0' if excl_l else ''
 
-        window_list = [f'{win_label} AS (w RANGE BETWEEN {win_len} PRECEDING AND {n_prec} PRECEDING)' for win_len, win_label in wins]
+        window_list = [f'{win_label} AS (w RANGE BETWEEN {win_minute * 60000} PRECEDING AND {n_prec} PRECEDING)' for win_minute, win_label in wins]
 
         return f"""
         ALTER TABLE {self.DATASET}.{table_id}
@@ -589,8 +607,9 @@ class Queries:
                 row_id,
                 {(',').join(calc_list)}
             FROM {self.DATASET}.train
+            {excl_l_string}
             WINDOW
-                w AS (PARTITION BY user_id ORDER BY {tid_col}),
+                w AS (PARTITION BY user_id ORDER BY timestamp),
                 {(',').join(window_list)}
         ) calc
         WHERE row_id = row_id_r;
@@ -851,7 +870,7 @@ class Queries:
         WITH final_users AS (
             SELECT user_id,
                 MAX(row_id) row_id,
-                MAX(task_container_id) task_container_id,
+                MAX(tid_orig) task_container_id,
                 MAX(timestamp) timestamp,
                 MAX(session) session,
                 SUM(answered_correctly) ac_cumsum,
